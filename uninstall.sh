@@ -13,6 +13,8 @@ INSTALL_DIR="/usr/local/bin"
 LOG_DIR="/var/log/repmenu"
 BACKUP_DIR="/var/backups/repmenu"
 CRON_FILE="/etc/cron.d/repmenu"
+CRON_JOBS_FILE="/etc/cron.d/repmenu-jobs"
+CRON_JOBS_HELPERS="/usr/local/bin/repmenu-jobs"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -58,6 +60,22 @@ if [ -f "$CRON_FILE" ]; then
     ok "Cron-Job entfernt: $CRON_FILE"
 else
     info "Kein Cron-Job gefunden (ok)."
+fi
+
+if [ -f "$CRON_JOBS_FILE" ]; then
+    if confirm "Backup/Wartungs-Cron-Jobs ($CRON_JOBS_FILE) ebenfalls entfernen?"; then
+        rm -f "$CRON_JOBS_FILE"
+        ok "Entfernt: $CRON_JOBS_FILE"
+    else
+        info "Backup/Wartungs-Cron-Jobs bleiben aktiv: $CRON_JOBS_FILE"
+    fi
+fi
+
+if [ -d "$CRON_JOBS_HELPERS" ]; then
+    if confirm "Helper-Skripte fuer Cron-Jobs ($CRON_JOBS_HELPERS) ebenfalls entfernen?"; then
+        rm -rf "$CRON_JOBS_HELPERS"
+        ok "Entfernt: $CRON_JOBS_HELPERS"
+    fi
 fi
 
 SCRIPTS=(

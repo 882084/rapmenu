@@ -30,6 +30,52 @@ repmenu
 - ZFS-Tuning: Compression, Recordsize, ARC-Size
 - Cron-Automatisierung mit einem Klick
 
+## Menüstruktur
+
+Das Hauptmenü ist in Kategorien gegliedert:
+
+1. **Replikation** – HA-Status, Jobs anzeigen/anlegen, sequenzieller Sync, ZFS-Tuning, Migrations-Netzwerk, Cron-Automatisierung
+2. **Backup & Wartung (Cron-Jobs)** – Checkliste mit Backup- und Wartungs-Jobs, siehe unten
+3. **Paketquellen (APT-Repositories)** – Repos an-/abschalten ohne manuelles Editieren, siehe unten
+4. **System Repair** – Config-Dateien bearbeiten, Dateibrowser, Backup-Wiederherstellung, Schnelle Reparaturen
+5. **Logs & Verlauf** – Rapmenu-Aktionen, Replikations-Logs, Backup/Wartungs-Logs getrennt einsehbar
+6. **Deinstallieren**
+
+### Paketquellen (APT-Repositories)
+
+Verwaltet `/etc/apt/sources.list` und alle Dateien unter `/etc/apt/sources.list.d/` (`.list` und `.sources`), ganz ohne die Konsole:
+
+- **Alle Paketquellen anzeigen** – Übersicht aller Dateien und Zeilen
+- **PVE Enterprise-Repo an/aus** – erkennt automatisch den aktuellen Zustand und schaltet um
+- **PVE No-Subscription-Repo an/aus**
+- **Ceph Enterprise-Repo an/aus**
+- **Einzelne Zeilen an/abschalten** – Checkliste pro Datei, jede Zeile einzeln per Leertaste an-/abwählbar (entspricht Auskommentieren/Einkommentieren)
+- **Datei im Editor bearbeiten** – für alles, was die Checkliste nicht abdeckt
+- **apt-get update ausführen** – direkt aus dem Menü
+
+Vor jeder Änderung wird automatisch ein Backup nach `/var/backups/repmenu` angelegt.
+
+### Cron-Jobs (Backup & Wartung)
+
+Auswählbare Checkliste mit vordefinierten, benannten Cron-Jobs in zwei Kategorien:
+
+**[Backup]** – LXC/VM-Sicherung via `vzdump`
+- Tägliches Vollbackup (LXC+VM)
+- Nur VMs sichern
+- Nur LXC-Container sichern
+- Alte Backups aufräumen (konfigurierbare Aufbewahrungsdauer)
+- Backup-Integrität prüfen
+
+**[Wartung]** – PVE-Systempflege
+- ZFS Scrub (monatlich)
+- APT Update-Check (nur prüfen, nichts installieren)
+- SMART Festplatten-Check
+- Kernel-Reboot-Check
+- Log-Aufräumen (journald)
+- SSL-Zertifikat-Erneuerung (ACME-Sicherheitsnetz)
+
+Beim ersten Backup-Job wird einmalig nach dem Ziel-Storage gefragt (aus `pvesm status`). Jobs lassen sich jederzeit erneut über die Checkliste an-/abwählen — der aktuelle Stand wird automatisch vorausgewählt angezeigt.
+
 ### System Repair
 - **Config-Dateien bearbeiten** mit automatischem Backup vor jeder Änderung (`/var/backups/repmenu`)
 - **Dateibrowser**: beliebige Datei unter `/etc` navigieren und bearbeiten
