@@ -78,6 +78,18 @@ if [ -d "$CRON_JOBS_HELPERS" ]; then
     fi
 fi
 
+CREDENTIALS_DIR="/etc/repmenu/credentials"
+if [ -d "$CREDENTIALS_DIR" ] && [ -n "$(ls -A "$CREDENTIALS_DIR" 2>/dev/null)" ]; then
+    warn "Es liegen gespeicherte Zugangsdaten fuer Netzwerkfreigaben unter $CREDENTIALS_DIR"
+    if confirm "Zugangsdaten WIRKLICH loeschen? (Betroffene Freigaben-Mounts werden dann beim naechsten Boot fehlschlagen, bis neu eingerichtet)"; then
+        rm -rf "$CREDENTIALS_DIR"
+        ok "Zugangsdaten geloescht: $CREDENTIALS_DIR"
+    else
+        info "Zugangsdaten bleiben erhalten: $CREDENTIALS_DIR"
+        warn "fstab-Eintraege fuer Freigaben (# repmenu-share:) bleiben ebenfalls bestehen und muessen bei Bedarf manuell entfernt werden."
+    fi
+fi
+
 SCRIPTS=(
     "repmenu.sh"
     "auto-ha-replication.sh"

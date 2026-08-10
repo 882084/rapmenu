@@ -278,12 +278,16 @@ CRON_JOB_DEFS=(
 "backup-lxc-only-daily|Backup|Nur LXC-Container sichern|vzdump nur fuer pct-Container, 03:00 Uhr"
 "backup-cleanup-weekly|Backup|Alte Backups aufraeumen|Loescht vzdump-Dateien aelter als 30 Tage, sonntags 04:00"
 "backup-verify-weekly|Backup|Backup-Integritaet pruefen|Prueft Archiv-Integritaet aller Backups, sonntags 05:00"
+"snapshot-cleanup-daily|Snapshots|Automatische Snapshots aufraeumen|Loescht Snapshots mit Praefix 'auto-' aelter als X Tage, schont manuelle Snapshots, taeglich 05:30"
 "zfs-scrub-monthly|Wartung|ZFS Scrub|Erster Sonntag im Monat, 02:00 Uhr"
 "apt-check-weekly|Wartung|APT Update-Check|Nur pruefen, nicht installieren, montags 06:00"
 "smart-check-daily|Wartung|SMART Festplatten-Check|Taeglich 06:00, mailt bei Fehlern"
 "kernel-reboot-check-daily|Wartung|Kernel-Reboot-Check|Prueft ob Reboot noetig ist, taeglich 07:00"
 "journal-vacuum-weekly|Wartung|Log-Aufraeumen (journald)|Begrenzt journald-Logs auf 500MB, sonntags 03:00"
 "acme-renew-daily|Wartung|SSL-Zertifikat-Erneuerung|ACME-Renew-Sicherheitsnetz, taeglich 03:00"
+"pve-config-backup-daily|Konfiguration|Proxmox-Konfiguration sichern|Sichert /etc/pve/*.cfg + Netzwerk-Config als Archiv, taeglich 01:00"
+"disk-space-alert-daily|Konfiguration|Speicherplatz-Warnung|Loggt Warnung wenn ein Mount ueber 90% voll ist, taeglich 08:00"
+"template-update-weekly|Konfiguration|Container-Templates aktualisieren|pveam update, montags 05:00"
 )
 
 get_job_field() {
@@ -381,6 +385,52 @@ fi"
         acme-renew-daily)
             echo "0 3 * * * root pvenode acme cert renew 2>&1 | logger -t acme-renew # repmenu-job:$JOBID" >> "$CRON_JOBS_FILE"
             ;;
+        snapshot-cleanup-daily)
+            local PREFIX DAYS2
+            PREFIX=$(whiptail --title "Snapshot-Praefix" --inputbox "Nur Snapshots mit diesem Praefix werden geloescht (schuetzt manuell erstellte Snapshots ohne diesen Praefix):" 10 70 "auto-" 3>&1 1>&2 2>&3)
+            [ -z "$PREFIX" ] && PREFIX="auto-"
+            DAYS2=$(whiptail --title "Snapshot-Alter" --inputbox "Snapshots aelter als wie viele Tage loeschen?" 10 60 "7" 3>&1 1>&2 2>&3)
+            [ -z "$DAYS2" ] && DAYS2=7
+            write_helper_script "snapshot-cleanup.sh" "#!/bin/bash
+MAX_AGE_DAYS=$DAYS2
+PREFIX='$PREFIX'
+for TYPE in qm pct; do
+    for VMID in \$(\$TYPE list 2>/dev/null | awk 'NR>1{print \$1}'); do
+        for SNAP in \$(\$TYPE listsnapshot \$VMID 2>/dev/null | grep -v current | awk '{print \$2}' | grep -v '^\$'); do
+            case \"\$SNAP\" in
+                \"\$PREFIX\"*) ;;
+                *) continue ;;
+            esac
+            SNAP_TIME=\$(\$TYPE config \$VMID --snapshot \"\$SNAP\" 2>/dev/null | grep snaptime | awk '{print \$2}')
+            [ -z \"\$SNAP_TIME\" ] && continue
+            AGE=\$(( (\$(date +%s) - SNAP_TIME) / 86400 ))
+            if [ \"\$AGE\" -gt \"\$MAX_AGE_DAYS\" ]; then
+                echo \"Loesche Snapshot '\$SNAP' von \$TYPE \$VMID (\${AGE} Tage alt)\"
+                \$TYPE delsnapshot \$VMID \"\$SNAP\"
+            fi
+        done
+    done
+done"
+            echo "30 5 * * * root $CRON_JOBS_HELPERS/snapshot-cleanup.sh >> $LOG_DIR/snapshot-cleanup.log 2>&1 # repmenu-job:$JOBID" >> "$CRON_JOBS_FILE"
+            ;;
+        pve-config-backup-daily)
+            write_helper_script "pve-config-backup.sh" "#!/bin/bash
+DEST=/var/backups/repmenu/pve-config
+mkdir -p \"\$DEST\"
+TS=\$(date '+%Y%m%d_%H%M%S')
+tar -czf \"\$DEST/pve-config_\${TS}.tar.gz\" /etc/pve/*.cfg /etc/network/interfaces /etc/hosts /etc/pve/storage.cfg /etc/pve/datacenter.cfg 2>/dev/null
+find \"\$DEST\" -name 'pve-config_*.tar.gz' -mtime +14 -delete
+echo \"Config-Backup erstellt: \$DEST/pve-config_\${TS}.tar.gz\""
+            echo "0 1 * * * root $CRON_JOBS_HELPERS/pve-config-backup.sh >> $LOG_DIR/pve-config-backup.log 2>&1 # repmenu-job:$JOBID" >> "$CRON_JOBS_FILE"
+            ;;
+        disk-space-alert-daily)
+            write_helper_script "disk-space-alert.sh" "#!/bin/bash
+df -hP | awk 'NR>1 {gsub(\"%\",\"\",\$5); if (\$5+0 > 90) print \"WARNUNG: \" \$6 \" ist zu \" \$5 \"% voll (\" \$1 \")\"}'"
+            echo "0 8 * * * root $CRON_JOBS_HELPERS/disk-space-alert.sh >> $LOG_DIR/disk-space-alert.log 2>&1 # repmenu-job:$JOBID" >> "$CRON_JOBS_FILE"
+            ;;
+        template-update-weekly)
+            echo "0 5 * * 1 root pveam update >> $LOG_DIR/template-update.log 2>&1 # repmenu-job:$JOBID" >> "$CRON_JOBS_FILE"
+            ;;
         *)
             return 1
             ;;
@@ -396,42 +446,51 @@ remove_cron_job() {
     fi
 }
 
-cron_jobs_menu() {
+cron_category_checklist() {
+    local CAT_FILTER="$1"
+    local TITLE="$2"
+
     touch "$CRON_JOBS_FILE"
 
-    # Checkliste bauen: aktuell aktivierte Jobs vorausgewaehlt
     local ITEMS=()
+    local IDS_IN_CATEGORY=()
     for DEF in "${CRON_JOB_DEFS[@]}"; do
         local ID CAT NAME DESC STATE
         ID=$(get_job_field "$DEF" 1)
         CAT=$(get_job_field "$DEF" 2)
+        [ "$CAT" != "$CAT_FILTER" ] && continue
         NAME=$(get_job_field "$DEF" 3)
         DESC=$(get_job_field "$DEF" 4)
+        IDS_IN_CATEGORY+=("$ID")
         if is_job_enabled "$ID"; then
             STATE="ON"
         else
             STATE="OFF"
         fi
-        ITEMS+=("$ID" "[$CAT] $NAME - $DESC" "$STATE")
+        ITEMS+=("$ID" "$NAME - $DESC" "$STATE")
     done
 
-    SELECTED=$(whiptail --title "Cron-Jobs auswaehlen" --checklist \
-        "Leertaste zum An-/Abwaehlen, Enter zum Bestaetigen.\n\nKategorien: [Backup] = LXC/VM-Sicherung, [Wartung] = PVE-Systempflege" \
+    if [ ${#ITEMS[@]} -eq 0 ]; then
+        pause "Keine Jobs in dieser Kategorie definiert."
+        return
+    fi
+
+    SELECTED=$(whiptail --title "$TITLE" --checklist \
+        "Leertaste zum An-/Abwaehlen, Enter zum Bestaetigen." \
         30 100 15 "${ITEMS[@]}" 3>&1 1>&2 2>&3)
 
     [ $? -ne 0 ] && return
 
-    # Alle bisherigen repmenu-job Zeilen entfernen, dann neu aufbauen
+    # Nur die repmenu-job Zeilen DIESER Kategorie entfernen, andere Kategorien bleiben unberuehrt
     if [ -f "$CRON_JOBS_FILE" ]; then
-        sed -i "/# repmenu-job:/d" "$CRON_JOBS_FILE"
+        for ID in "${IDS_IN_CATEGORY[@]}"; do
+            sed -i "/# repmenu-job:$ID$/d" "$CRON_JOBS_FILE"
+        done
     fi
 
-    # SELECTED ist eine mit Leerzeichen getrennte Liste von Job-IDs in Anfuehrungszeichen
     eval "SELECTED_ARR=($SELECTED)"
 
-    for DEF in "${CRON_JOB_DEFS[@]}"; do
-        local ID
-        ID=$(get_job_field "$DEF" 1)
+    for ID in "${IDS_IN_CATEGORY[@]}"; do
         for CHOSEN in "${SELECTED_ARR[@]:-}"; do
             if [ "$CHOSEN" == "$ID" ]; then
                 install_cron_job "$ID"
@@ -440,7 +499,27 @@ cron_jobs_menu() {
         done
     done
 
-    pause "Cron-Jobs aktualisiert.\n\nDatei: $CRON_JOBS_FILE\nHelper-Skripte: $CRON_JOBS_HELPERS\nLogs: $LOG_DIR"
+    pause "Jobs in Kategorie \"$TITLE\" aktualisiert.\n\nDatei: $CRON_JOBS_FILE\nHelper-Skripte: $CRON_JOBS_HELPERS\nLogs: $LOG_DIR"
+}
+
+cron_jobs_menu() {
+    while true; do
+        CHOICE=$(whiptail --title "Cron-Jobs" --menu "Kategorie waehlen:" 20 78 6 \
+            "1" "Backup (LXC/VM sichern)" \
+            "2" "Snapshot-Verwaltung" \
+            "3" "System-Wartung" \
+            "4" "Konfiguration & Sonstiges" \
+            "5" "Zurueck" \
+            3>&1 1>&2 2>&3)
+        [ $? -ne 0 ] && break
+        case "$CHOICE" in
+            1) cron_category_checklist "Backup" "Backup-Jobs (LXC/VM)" ;;
+            2) cron_category_checklist "Snapshots" "Snapshot-Verwaltung" ;;
+            3) cron_category_checklist "Wartung" "System-Wartung" ;;
+            4) cron_category_checklist "Konfiguration" "Konfiguration & Sonstiges" ;;
+            5|"") break ;;
+        esac
+    done
 }
 
 view_cron_jobs_status() {
@@ -661,6 +740,273 @@ apt_repo_menu() {
                 ;;
             7) repo_update_check ;;
             8|"") break ;;
+        esac
+    done
+}
+
+# ================================================================
+# NETZWERKFREIGABEN (NFS/CIFS) an LXC-Container anbinden
+# ================================================================
+#
+# Proxmox-LXC-Container koennen NFS/CIFS meist nicht direkt selbst
+# mounten (Kernel-Modul-Einschraenkung, v.a. bei unprivilegierten
+# Containern). Der saubere Weg: der PVE-HOST mountet die Freigabe,
+# der Container bekommt sie per Bind-Mount (pct set -mpX) durchgereicht.
+#
+# Auto-Reconnect: fstab-Eintraege nutzen systemd x-systemd.automount,
+# zusaetzlich ein optionaler Cron-Check als Sicherheitsnetz.
+
+SHARES_MARKER_PREFIX="# repmenu-share:"
+CREDENTIALS_DIR="/etc/repmenu/credentials"
+mkdir -p "$CREDENTIALS_DIR"
+chmod 700 "$CREDENTIALS_DIR"
+
+share_ask_name() {
+    whiptail --title "Name der Freigabe" --inputbox "Kurzer, eindeutiger Name fuer diese Freigabe (nur Buchstaben/Zahlen/Bindestrich, z.B. 'nas-media'):" 10 70 3>&1 1>&2 2>&3
+}
+
+share_find_free_mp_slot() {
+    # $1 = CTID -> gibt naechste freie mpX-Nummer zurueck (0-9)
+    local CTID="$1"
+    for N in 0 1 2 3 4 5 6 7 8 9; do
+        if ! pct config "$CTID" 2>/dev/null | grep -q "^mp${N}:"; then
+            echo "$N"
+            return
+        fi
+    done
+    echo ""
+}
+
+share_offer_lxc_bind() {
+    local NAME="$1"
+    local HOST_MOUNTPOINT="$2"
+
+    if ! confirm "Freigabe \"$NAME\" jetzt zusaetzlich per Bind-Mount in einen LXC-Container einbinden?"; then
+        return
+    fi
+
+    local CT_LIST
+    CT_LIST=$(pct list 2>/dev/null | awk 'NR>1{print $1, $3}')
+    if [ -z "$CT_LIST" ]; then
+        pause "Keine LXC-Container gefunden."
+        return
+    fi
+
+    local CT_ITEMS=()
+    while read -r ID HNAME; do
+        CT_ITEMS+=("$ID" "$HNAME")
+    done <<< "$CT_LIST"
+
+    local CTID
+    CTID=$(whiptail --title "Container waehlen" --menu "In welchen Container einbinden?" 20 70 10 "${CT_ITEMS[@]}" 3>&1 1>&2 2>&3)
+    [ -z "${CTID:-}" ] && return
+
+    local SLOT
+    SLOT=$(share_find_free_mp_slot "$CTID")
+    if [ -z "$SLOT" ]; then
+        pause "Keine freien Mountpoint-Slots (mp0-mp9) mehr fuer Container $CTID."
+        return
+    fi
+
+    local CT_PATH
+    CT_PATH=$(whiptail --title "Pfad im Container" --inputbox "Unter welchem Pfad soll die Freigabe im Container erscheinen?" 10 70 "/mnt/$NAME" 3>&1 1>&2 2>&3)
+    [ -z "$CT_PATH" ] && return
+
+    if confirm "Bind-Mount einrichten?\n\nHost:      $HOST_MOUNTPOINT\nContainer: $CTID (Slot mp$SLOT)\nZiel-Pfad: $CT_PATH\n\nHinweis: Container muss dafuer neu gestartet werden (oder mind. mp neu geladen werden)."; then
+        run_and_show "pct set $CTID -mp$SLOT $HOST_MOUNTPOINT,mp=$CT_PATH" "Bind-Mount eingerichtet"
+        log_action "Bind-Mount: $HOST_MOUNTPOINT -> CT $CTID:$CT_PATH (mp$SLOT)"
+        if confirm "Container $CTID jetzt neustarten, damit der Mount aktiv wird?"; then
+            run_and_show "pct reboot $CTID" "Container neugestartet"
+        fi
+    fi
+}
+
+share_add_nfs() {
+    local NAME SERVER EXPORT_PATH MOUNTPOINT NFSVERS
+
+    NAME=$(share_ask_name)
+    [ -z "$NAME" ] && return
+
+    SERVER=$(whiptail --title "NFS-Server" --inputbox "IP-Adresse oder Hostname des NFS-Servers:" 10 70 3>&1 1>&2 2>&3)
+    [ -z "$SERVER" ] && return
+
+    EXPORT_PATH=$(whiptail --title "Export-Pfad" --inputbox "Freigegebener Pfad auf dem Server (z.B. /volume1/data):" 10 70 3>&1 1>&2 2>&3)
+    [ -z "$EXPORT_PATH" ] && return
+
+    MOUNTPOINT=$(whiptail --title "Mountpoint auf dem PVE-Host" --inputbox "Wohin soll auf DIESEM Proxmox-Host gemountet werden?" 10 70 "/mnt/pve/$NAME" 3>&1 1>&2 2>&3)
+    [ -z "$MOUNTPOINT" ] && return
+
+    NFSVERS=$(whiptail --title "NFS-Version" --menu "Welche NFS-Version verwenden?" 15 60 3 \
+        "4" "NFSv4 (Standard, empfohlen)" \
+        "3" "NFSv3 (aeltere NAS-Systeme)" \
+        "auto" "Automatisch aushandeln" \
+        3>&1 1>&2 2>&3)
+    [ -z "$NFSVERS" ] && NFSVERS="4"
+
+    mkdir -p "$MOUNTPOINT"
+
+    local OPTS="_netdev,x-systemd.automount,x-systemd.mount-timeout=10,x-systemd.idle-timeout=1min,retry=3"
+    if [ "$NFSVERS" != "auto" ]; then
+        OPTS="nfsvers=$NFSVERS,$OPTS"
+    fi
+
+    local FSTAB_LINE="$SERVER:$EXPORT_PATH $MOUNTPOINT nfs $OPTS 0 0 ${SHARES_MARKER_PREFIX}${NAME}"
+
+    backup_file /etc/fstab > /dev/null
+    echo "$FSTAB_LINE" >> /etc/fstab
+
+    systemctl daemon-reload
+    run_and_show "mount '$MOUNTPOINT' && ls -la '$MOUNTPOINT' && echo '--- Mount erfolgreich ---' || echo '--- FEHLER beim Mounten, bitte fstab pruefen ---'" "NFS-Freigabe einbinden - Ergebnis"
+
+    log_action "NFS-Freigabe hinzugefuegt: $NAME ($SERVER:$EXPORT_PATH -> $MOUNTPOINT)"
+
+    share_offer_lxc_bind "$NAME" "$MOUNTPOINT"
+}
+
+share_add_cifs() {
+    local NAME SERVER SHARE_NAME DOMAIN USERNAME PASSWORD MOUNTPOINT
+
+    NAME=$(share_ask_name)
+    [ -z "$NAME" ] && return
+
+    SERVER=$(whiptail --title "CIFS/SMB-Server" --inputbox "IP-Adresse oder Hostname des Servers:" 10 70 3>&1 1>&2 2>&3)
+    [ -z "$SERVER" ] && return
+
+    SHARE_NAME=$(whiptail --title "Freigabename" --inputbox "Name der Freigabe (ohne Slashes, z.B. 'media' fuer \\\\server\\media):" 10 70 3>&1 1>&2 2>&3)
+    [ -z "$SHARE_NAME" ] && return
+
+    DOMAIN=$(whiptail --title "Domain (optional)" --inputbox "Windows-Domain oder Arbeitsgruppe (leer lassen falls nicht benoetigt):" 10 70 3>&1 1>&2 2>&3)
+
+    USERNAME=$(whiptail --title "Benutzername" --inputbox "Benutzername fuer die Freigabe:" 10 70 3>&1 1>&2 2>&3)
+    [ -z "$USERNAME" ] && return
+
+    PASSWORD=$(whiptail --title "Passwort" --passwordbox "Passwort fuer $USERNAME:" 10 70 3>&1 1>&2 2>&3)
+    [ -z "$PASSWORD" ] && return
+
+    MOUNTPOINT=$(whiptail --title "Mountpoint auf dem PVE-Host" --inputbox "Wohin soll auf DIESEM Proxmox-Host gemountet werden?" 10 70 "/mnt/pve/$NAME" 3>&1 1>&2 2>&3)
+    [ -z "$MOUNTPOINT" ] && return
+
+    mkdir -p "$MOUNTPOINT"
+
+    # Credentials-Datei sicher anlegen (nicht im Klartext in fstab)
+    local CRED_FILE="$CREDENTIALS_DIR/${NAME}.cred"
+    {
+        echo "username=$USERNAME"
+        echo "password=$PASSWORD"
+        [ -n "$DOMAIN" ] && echo "domain=$DOMAIN"
+    } > "$CRED_FILE"
+    chmod 600 "$CRED_FILE"
+
+    local OPTS="credentials=$CRED_FILE,iocharset=utf8,_netdev,x-systemd.automount,x-systemd.mount-timeout=10,x-systemd.idle-timeout=1min,uid=0,gid=0,file_mode=0770,dir_mode=0770"
+    local FSTAB_LINE="//$SERVER/$SHARE_NAME $MOUNTPOINT cifs $OPTS 0 0 ${SHARES_MARKER_PREFIX}${NAME}"
+
+    backup_file /etc/fstab > /dev/null
+    echo "$FSTAB_LINE" >> /etc/fstab
+
+    systemctl daemon-reload
+    run_and_show "mount '$MOUNTPOINT' && ls -la '$MOUNTPOINT' && echo '--- Mount erfolgreich ---' || echo '--- FEHLER beim Mounten, bitte Zugangsdaten/fstab pruefen ---'" "CIFS-Freigabe einbinden - Ergebnis"
+
+    log_action "CIFS-Freigabe hinzugefuegt: $NAME (//$SERVER/$SHARE_NAME -> $MOUNTPOINT)"
+
+    share_offer_lxc_bind "$NAME" "$MOUNTPOINT"
+}
+
+share_list() {
+    local TMPFILE
+    TMPFILE=$(mktemp)
+    {
+        echo "=== Von Rapmenu verwaltete Freigaben (aus /etc/fstab) ==="
+        echo ""
+        grep "$SHARES_MARKER_PREFIX" /etc/fstab 2>/dev/null || echo "Keine Freigaben gefunden."
+        echo ""
+        echo "=== Aktueller Mount-Status ==="
+        for LINE in $(grep "$SHARES_MARKER_PREFIX" /etc/fstab 2>/dev/null | awk '{print $2}'); do
+            if mountpoint -q "$LINE" 2>/dev/null; then
+                echo "OK       $LINE (gemountet)"
+            else
+                echo "NICHT AKTIV  $LINE (nicht gemountet - evtl. Lazy-Automount, wird bei Zugriff aktiv)"
+            fi
+        done
+    } > "$TMPFILE"
+    whiptail --title "Netzwerkfreigaben - Uebersicht" --scrolltext --textbox "$TMPFILE" 30 100
+    rm -f "$TMPFILE"
+}
+
+share_remove() {
+    local SHARES
+    SHARES=$(grep "$SHARES_MARKER_PREFIX" /etc/fstab 2>/dev/null | sed -E "s/.*${SHARES_MARKER_PREFIX}//")
+    if [ -z "$SHARES" ]; then
+        pause "Keine von Rapmenu verwalteten Freigaben gefunden."
+        return
+    fi
+
+    local ITEMS=()
+    while IFS= read -r S; do
+        ITEMS+=("$S" "")
+    done <<< "$SHARES"
+
+    local NAME
+    NAME=$(whiptail --title "Freigabe entfernen" --menu "Welche Freigabe entfernen?" 20 70 10 "${ITEMS[@]}" 3>&1 1>&2 2>&3)
+    [ -z "${NAME:-}" ] && return
+
+    local MOUNTPOINT
+    MOUNTPOINT=$(grep "${SHARES_MARKER_PREFIX}${NAME}$" /etc/fstab | awk '{print $2}')
+
+    if confirm "Freigabe \"$NAME\" wirklich entfernen?\n\nMountpoint: $MOUNTPOINT\n\n(Aushaengen + fstab-Eintrag + Zugangsdaten werden entfernt. Bind-Mounts in Containern muessen manuell mit 'pct set <ID> -delete mpX' entfernt werden.)"; then
+        umount "$MOUNTPOINT" 2>/dev/null
+        backup_file /etc/fstab > /dev/null
+        sed -i "\|${SHARES_MARKER_PREFIX}${NAME}$|d" /etc/fstab
+        rm -f "$CREDENTIALS_DIR/${NAME}.cred"
+        systemctl daemon-reload
+        log_action "Freigabe entfernt: $NAME"
+        pause "Freigabe \"$NAME\" entfernt."
+    fi
+}
+
+share_check_reconnect() {
+    if confirm "Reconnect-Check jetzt manuell ausfuehren?\n\nVersucht alle konfigurierten Freigaben zu mounten, falls sie nicht aktiv sind."; then
+        run_and_show "for MP in \$(grep '$SHARES_MARKER_PREFIX' /etc/fstab | awk '{print \$2}'); do if ! mountpoint -q \"\$MP\"; then echo \"Versuche Reconnect: \$MP\"; mount \"\$MP\" && echo \"OK: \$MP\" || echo \"FEHLER: \$MP\"; else echo \"Bereits aktiv: \$MP\"; fi; done" "Reconnect-Check - Ergebnis"
+    fi
+}
+
+share_setup_autoreconnect_cron() {
+    if confirm "Automatischen Reconnect-Check per Cron einrichten?\n\nPrueft alle 5 Minuten, ob Freigaben aktiv sind, und mountet sie bei Bedarf neu (Sicherheitsnetz zusaetzlich zu systemd-automount)."; then
+        write_helper_script "share-reconnect-check.sh" "#!/bin/bash
+for MP in \$(grep '$SHARES_MARKER_PREFIX' /etc/fstab 2>/dev/null | awk '{print \$2}'); do
+    if ! mountpoint -q \"\$MP\" 2>/dev/null; then
+        echo \"\$(date): Reconnect-Versuch fuer \$MP\"
+        mount \"\$MP\" 2>&1
+    fi
+done"
+        local CRON_LINE="*/5 * * * * root $CRON_JOBS_HELPERS/share-reconnect-check.sh >> $LOG_DIR/share-reconnect.log 2>&1 # repmenu-job:share-reconnect-check"
+        touch "$CRON_JOBS_FILE"
+        sed -i "/# repmenu-job:share-reconnect-check$/d" "$CRON_JOBS_FILE"
+        echo "$CRON_LINE" >> "$CRON_JOBS_FILE"
+        log_action "Auto-Reconnect-Cron fuer Freigaben eingerichtet"
+        pause "Auto-Reconnect-Check eingerichtet (alle 5 Minuten).\n\nLog: $LOG_DIR/share-reconnect.log"
+    fi
+}
+
+shares_menu() {
+    while true; do
+        CHOICE=$(whiptail --title "Netzwerkfreigaben (NFS/CIFS)" --menu "Was moechtest du tun?" 22 78 8 \
+            "1" "Neue NFS-Freigabe verbinden" \
+            "2" "Neue CIFS/SMB-Freigabe verbinden" \
+            "3" "Freigaben anzeigen (Status)" \
+            "4" "Freigabe entfernen" \
+            "5" "Reconnect jetzt manuell ausfuehren" \
+            "6" "Automatischen Reconnect-Check einrichten (Cron)" \
+            "7" "Zurueck" \
+            3>&1 1>&2 2>&3)
+        [ $? -ne 0 ] && break
+        case "$CHOICE" in
+            1) share_add_nfs ;;
+            2) share_add_cifs ;;
+            3) share_list ;;
+            4) share_remove ;;
+            5) share_check_reconnect ;;
+            6) share_setup_autoreconnect_cron ;;
+            7|"") break ;;
         esac
     done
 }
@@ -941,9 +1287,9 @@ uninstall_tool() {
 
 backup_wartung_menu() {
     while true; do
-        CHOICE=$(whiptail --title "Backup & Wartung" --menu "Was moechtest du tun?" 18 78 4 \
-            "1" "Cron-Jobs auswaehlen (Checkliste)" \
-            "2" "Aktive Cron-Jobs anzeigen" \
+        CHOICE=$(whiptail --title "Cron-Jobs" --menu "Was moechtest du tun?" 18 78 4 \
+            "1" "Jobs nach Kategorie auswaehlen" \
+            "2" "Aktive Jobs anzeigen (alle Kategorien)" \
             "3" "Zurueck" \
             3>&1 1>&2 2>&3)
         [ $? -ne 0 ] && break
@@ -951,6 +1297,186 @@ backup_wartung_menu() {
             1) cron_jobs_menu ;;
             2) view_cron_jobs_status ;;
             3|"") break ;;
+        esac
+    done
+}
+
+# ================================================================
+# BEREINIGUNG (Fehlinstallationen, verwaiste Dateien/Pakete)
+# ================================================================
+
+cleanup_detect_docker_on_host() {
+    local TMPFILE
+    TMPFILE=$(mktemp)
+    {
+        echo "=== Docker-Pakete (dpkg) ==="
+        dpkg -l 2>/dev/null | grep -iE 'docker|containerd' || echo "Keine Docker/Containerd-Pakete installiert."
+        echo ""
+        echo "=== Docker-Dienst ==="
+        systemctl status docker --no-pager 2>&1 | head -5 || echo "Kein docker.service gefunden."
+        echo ""
+        echo "=== Docker-Datenverzeichnisse ==="
+        for D in /var/lib/docker /var/lib/containerd /etc/docker; do
+            if [ -d "$D" ]; then
+                SIZE=$(du -sh "$D" 2>/dev/null | cut -f1)
+                echo "$D existiert (Groesse: $SIZE)"
+            else
+                echo "$D existiert nicht"
+            fi
+        done
+    } > "$TMPFILE"
+    whiptail --title "Docker auf PVE-Host - Erkennung" --scrolltext --textbox "$TMPFILE" 30 100
+    rm -f "$TMPFILE"
+}
+
+cleanup_remove_docker_on_host() {
+    if ! dpkg -l 2>/dev/null | grep -qiE 'docker|containerd' && [ ! -d /var/lib/docker ]; then
+        pause "Keine Docker-Installation auf diesem Host gefunden. Nichts zu entfernen."
+        return
+    fi
+
+    if ! whiptail --title "ACHTUNG - Docker vom PVE-Host entfernen" --yesno "Docker sollte NIEMALS direkt auf dem Proxmox-Host laufen - es gehoert immer in eine VM oder einen LXC-Container.\n\nDiese Aktion wird:\n- Alle Docker/Containerd-Pakete purgen\n- /var/lib/docker, /var/lib/containerd, /etc/docker loeschen\n- Verwaiste Abhaengigkeiten entfernen\n\nALLE Docker-Container/Images/Volumes auf diesem Host gehen dabei verloren!\n\nWirklich fortfahren?" 20 78; then
+        return
+    fi
+
+    if ! whiptail --title "Letzte Bestaetigung" --yesno "Bist du dir WIRKLICH sicher?\n\nDies ist nicht rueckgaengig zu machen." 10 60; then
+        return
+    fi
+
+    run_and_show "apt-get purge -y docker-ce docker-ce-cli docker-ce-rootless-extras containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-doc docker-compose podman-docker 2>/dev/null; \
+        apt-get autoremove -y; \
+        rm -rf /var/lib/docker /var/lib/containerd /etc/docker; \
+        groupdel docker 2>/dev/null; \
+        echo '--- Docker-Entfernung abgeschlossen ---'" "Docker entfernen - Ergebnis"
+
+    log_action "Docker auf PVE-Host entfernt (versehentliche Host-Installation korrigiert)"
+}
+
+cleanup_orphaned_packages() {
+    local TMPFILE
+    TMPFILE=$(mktemp)
+    apt-get autoremove --dry-run 2>/dev/null > "$TMPFILE"
+
+    if ! grep -q "Remove" "$TMPFILE"; then
+        pause "Keine verwaisten Pakete gefunden."
+        rm -f "$TMPFILE"
+        return
+    fi
+
+    whiptail --title "Verwaiste Pakete (Vorschau)" --scrolltext --textbox "$TMPFILE" 25 100
+    rm -f "$TMPFILE"
+
+    if confirm "Diese Pakete jetzt entfernen (apt-get autoremove --purge)?"; then
+        run_and_show "apt-get autoremove --purge -y" "Verwaiste Pakete entfernen - Ergebnis"
+        log_action "Verwaiste Pakete entfernt (apt autoremove --purge)"
+    fi
+}
+
+cleanup_residual_configs() {
+    local RESIDUAL
+    RESIDUAL=$(dpkg -l 2>/dev/null | awk '/^rc/{print $2}')
+
+    if [ -z "$RESIDUAL" ]; then
+        pause "Keine Pakete mit uebrig gebliebener Konfiguration gefunden."
+        return
+    fi
+
+    if ! whiptail --title "Residual-Konfigurationen" --yesno "Folgende deinstallierten Pakete haben noch Konfigurationsreste:\n\n$RESIDUAL\n\nJetzt vollstaendig purgen?" 20 70; then
+        return
+    fi
+
+    run_and_show "dpkg --purge $RESIDUAL" "Residual-Configs purgen - Ergebnis"
+    log_action "Residual-Konfigurationen gepurged: $RESIDUAL"
+}
+
+cleanup_broken_symlinks() {
+    local TMPFILE
+    TMPFILE=$(mktemp)
+    {
+        echo "=== Defekte Symlinks unter /usr/local, /opt, /etc ==="
+        find /usr/local /opt /etc -xtype l 2>/dev/null
+        echo ""
+        echo "(Leer = keine defekten Symlinks gefunden)"
+    } > "$TMPFILE"
+    whiptail --title "Defekte Symlinks" --scrolltext --textbox "$TMPFILE" 25 100
+
+    if confirm "Sollen die oben gefundenen defekten Symlinks geloescht werden?\n(Nur relevant, falls die Liste nicht leer war)"; then
+        run_and_show "find /usr/local /opt /etc -xtype l -delete -print 2>/dev/null; echo '--- Bereinigung abgeschlossen ---'" "Defekte Symlinks entfernen - Ergebnis"
+        log_action "Defekte Symlinks unter /usr/local, /opt, /etc entfernt"
+    fi
+    rm -f "$TMPFILE"
+}
+
+cleanup_old_tmp_files() {
+    local TMPFILE
+    TMPFILE=$(mktemp)
+    find /tmp /var/tmp -type f -mtime +7 -size +10M 2>/dev/null -exec ls -lh {} \; > "$TMPFILE"
+
+    if [ ! -s "$TMPFILE" ]; then
+        pause "Keine alten/grossen Dateien (>10MB, aelter als 7 Tage) in /tmp oder /var/tmp gefunden."
+        rm -f "$TMPFILE"
+        return
+    fi
+
+    whiptail --title "Alte Dateien in /tmp, /var/tmp" --scrolltext --textbox "$TMPFILE" 25 120
+    rm -f "$TMPFILE"
+
+    if confirm "Diese Dateien jetzt loeschen?"; then
+        run_and_show "find /tmp /var/tmp -type f -mtime +7 -size +10M -delete -print 2>/dev/null; echo '--- Fertig ---'" "Alte Temp-Dateien entfernen - Ergebnis"
+        log_action "Alte Temp-Dateien in /tmp, /var/tmp entfernt"
+    fi
+}
+
+cleanup_apt_cache() {
+    run_and_show "du -sh /var/cache/apt/archives 2>/dev/null; apt-get clean; echo '--- APT-Cache geleert ---'; du -sh /var/cache/apt/archives 2>/dev/null" "APT-Cache leeren - Ergebnis"
+    log_action "APT-Paketcache geleert"
+}
+
+cleanup_check_unused_lxc_disks() {
+    local TMPFILE
+    TMPFILE=$(mktemp)
+    {
+        echo "=== ZFS-Datasets ohne zugehoerigen LXC/VM (evtl. Reste alter/geloeschter Gaeste) ==="
+        echo ""
+        EXISTING_IDS=$(pct list 2>/dev/null | awk 'NR>1{print $1}'; qm list 2>/dev/null | awk 'NR>1{print $1}')
+        for DS in $(zfs list -H -o name 2>/dev/null | grep -E 'subvol-|vm-'); do
+            ID=$(echo "$DS" | grep -oP '(?:subvol|vm)-\K[0-9]+')
+            if [ -n "$ID" ] && ! echo "$EXISTING_IDS" | grep -qx "$ID"; then
+                SIZE=$(zfs list -H -o used "$DS" 2>/dev/null)
+                echo "$DS (ID $ID nicht mehr vorhanden, Groesse: $SIZE)"
+            fi
+        done
+        echo ""
+        echo "(Leer = keine verwaisten Datasets gefunden. VORSICHT vor dem Loeschen: manuell pruefen, nicht blind entfernen!)"
+    } > "$TMPFILE"
+    whiptail --title "Verwaiste ZFS-Datasets (VM/LXC-Reste)" --scrolltext --textbox "$TMPFILE" 25 100
+    rm -f "$TMPFILE"
+}
+
+cleanup_menu() {
+    while true; do
+        CHOICE=$(whiptail --title "Bereinigung" --menu "Was moechtest du pruefen/bereinigen?" 22 82 10 \
+            "1" "Docker auf PVE-Host pruefen (falls versehentlich installiert)" \
+            "2" "Docker auf PVE-Host entfernen" \
+            "3" "Verwaiste Pakete entfernen (apt autoremove)" \
+            "4" "Residual-Konfigurationen purgen" \
+            "5" "Defekte Symlinks finden/entfernen" \
+            "6" "Alte/grosse Dateien in /tmp aufraeumen" \
+            "7" "APT-Paketcache leeren" \
+            "8" "Verwaiste ZFS-Datasets pruefen (alte VM/LXC-Reste)" \
+            "9" "Zurueck" \
+            3>&1 1>&2 2>&3)
+        [ $? -ne 0 ] && break
+        case "$CHOICE" in
+            1) cleanup_detect_docker_on_host ;;
+            2) cleanup_remove_docker_on_host ;;
+            3) cleanup_orphaned_packages ;;
+            4) cleanup_residual_configs ;;
+            5) cleanup_broken_symlinks ;;
+            6) cleanup_old_tmp_files ;;
+            7) cleanup_apt_cache ;;
+            8) cleanup_check_unused_lxc_disks ;;
+            9|"") break ;;
         esac
     done
 }
@@ -975,13 +1501,15 @@ logs_menu() {
 
 main_menu() {
     while true; do
-        CHOICE=$(whiptail --title "Rapmenu v$VERSION" --menu "Hauptmenue - Kategorie waehlen:" 20 74 6 \
+        CHOICE=$(whiptail --title "Rapmenu v$VERSION" --menu "Hauptmenue - Kategorie waehlen:" 24 78 8 \
             "1" "Replikation" \
-            "2" "Backup & Wartung (Cron-Jobs)" \
-            "3" "Paketquellen (APT-Repositories)" \
-            "4" "System Repair" \
-            "5" "Logs & Verlauf" \
-            "6" "Deinstallieren" \
+            "2" "Cron-Jobs" \
+            "3" "Netzwerkfreigaben (NFS/CIFS)" \
+            "4" "Paketquellen (APT-Repositories)" \
+            "5" "System Repair" \
+            "6" "Bereinigung (Fehlinstallationen, Muell)" \
+            "7" "Logs & Verlauf" \
+            "8" "Deinstallieren" \
             "0" "Beenden" \
             3>&1 1>&2 2>&3)
 
@@ -993,10 +1521,12 @@ main_menu() {
         case "$CHOICE" in
             1) replication_menu ;;
             2) backup_wartung_menu ;;
-            3) apt_repo_menu ;;
-            4) system_repair_menu ;;
-            5) logs_menu ;;
-            6) uninstall_tool ;;
+            3) shares_menu ;;
+            4) apt_repo_menu ;;
+            5) system_repair_menu ;;
+            6) cleanup_menu ;;
+            7) logs_menu ;;
+            8) uninstall_tool ;;
             0) break ;;
         esac
     done

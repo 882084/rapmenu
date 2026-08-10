@@ -35,11 +35,13 @@ repmenu
 Das Hauptmenü ist in Kategorien gegliedert:
 
 1. **Replikation** – HA-Status, Jobs anzeigen/anlegen, sequenzieller Sync, ZFS-Tuning, Migrations-Netzwerk, Cron-Automatisierung
-2. **Backup & Wartung (Cron-Jobs)** – Checkliste mit Backup- und Wartungs-Jobs, siehe unten
-3. **Paketquellen (APT-Repositories)** – Repos an-/abschalten ohne manuelles Editieren, siehe unten
-4. **System Repair** – Config-Dateien bearbeiten, Dateibrowser, Backup-Wiederherstellung, Schnelle Reparaturen
-5. **Logs & Verlauf** – Rapmenu-Aktionen, Replikations-Logs, Backup/Wartungs-Logs getrennt einsehbar
-6. **Deinstallieren**
+2. **Cron-Jobs** – Backup, Snapshot-Verwaltung, System-Wartung, Konfiguration & Sonstiges (je eigene Unterkategorie)
+3. **Netzwerkfreigaben (NFS/CIFS)** – Freigaben mit dem Host verbinden, optional per Bind-Mount in LXC-Container einbinden, automatische Wiederverbindung
+4. **Paketquellen (APT-Repositories)** – Repos an-/abschalten ohne manuelles Editieren, siehe unten
+5. **System Repair** – Config-Dateien bearbeiten, Dateibrowser, Backup-Wiederherstellung, Schnelle Reparaturen
+6. **Bereinigung** – Fehlinstallationen (v.a. Docker auf dem PVE-Host) und verwaisten Kram entfernen, siehe unten
+7. **Logs & Verlauf** – Rapmenu-Aktionen, Replikations-Logs, Backup/Wartungs-Logs getrennt einsehbar
+8. **Deinstallieren**
 
 ### Paketquellen (APT-Repositories)
 
@@ -55,18 +57,21 @@ Verwaltet `/etc/apt/sources.list` und alle Dateien unter `/etc/apt/sources.list.
 
 Vor jeder Änderung wird automatisch ein Backup nach `/var/backups/repmenu` angelegt.
 
-### Cron-Jobs (Backup & Wartung)
+### Cron-Jobs
 
-Auswählbare Checkliste mit vordefinierten, benannten Cron-Jobs in zwei Kategorien:
+**Eine** zentrale Kategorie im Hauptmenü, darunter vier Unterkategorien mit jeweils eigener Checkliste (Leertaste an/ab, Enter übernimmt nur die Jobs dieser Kategorie – andere Kategorien bleiben unberührt):
 
-**[Backup]** – LXC/VM-Sicherung via `vzdump`
+**Backup** (LXC/VM via `vzdump`)
 - Tägliches Vollbackup (LXC+VM)
 - Nur VMs sichern
 - Nur LXC-Container sichern
 - Alte Backups aufräumen (konfigurierbare Aufbewahrungsdauer)
 - Backup-Integrität prüfen
 
-**[Wartung]** – PVE-Systempflege
+**Snapshot-Verwaltung**
+- Automatische Snapshots aufräumen – löscht nur Snapshots mit einem konfigurierbaren Präfix (Standard `auto-`) älter als X Tage; manuell angelegte Snapshots ohne dieses Präfix werden **nicht** angefasst
+
+**System-Wartung**
 - ZFS Scrub (monatlich)
 - APT Update-Check (nur prüfen, nichts installieren)
 - SMART Festplatten-Check
@@ -74,7 +79,47 @@ Auswählbare Checkliste mit vordefinierten, benannten Cron-Jobs in zwei Kategori
 - Log-Aufräumen (journald)
 - SSL-Zertifikat-Erneuerung (ACME-Sicherheitsnetz)
 
-Beim ersten Backup-Job wird einmalig nach dem Ziel-Storage gefragt (aus `pvesm status`). Jobs lassen sich jederzeit erneut über die Checkliste an-/abwählen — der aktuelle Stand wird automatisch vorausgewählt angezeigt.
+**Konfiguration & Sonstiges**
+- Proxmox-Konfiguration sichern – tarrt `/etc/pve/*.cfg`, Netzwerk-Config etc. in ein Archiv, 14 Tage Aufbewahrung
+- Speicherplatz-Warnung – loggt, wenn ein Mount über 90% voll ist
+- Container-Templates aktualisieren – `pveam update`
+
+Beim ersten Backup-Job wird einmalig nach dem Ziel-Storage gefragt (aus `pvesm status`). Der aktuelle Auswahlstand wird bei jedem Öffnen automatisch vorausgewählt angezeigt.
+
+### Netzwerkfreigaben (NFS/CIFS)
+
+Verbindet NFS- oder CIFS/SMB-Freigaben mit dem Proxmox-Host und optional per Bind-Mount mit einem LXC-Container – komplett per Menüabfrage, kein manuelles fstab-Editieren nötig.
+
+**Wichtiger Hintergrund:** LXC-Container (besonders unprivilegierte) können NFS/CIFS meist nicht direkt selbst mounten. Der saubere Weg: der **Proxmox-Host** mountet die Freigabe, der Container bekommt sie per `pct set <ID> -mpX <hostpfad>,mp=<containerpfad>` durchgereicht. Rapmenu bietet das automatisch als letzten Schritt nach dem Einrichten der Freigabe an.
+
+**Abgefragte Daten:**
+- NFS: Server-IP/Hostname, Export-Pfad, Mountpoint auf dem Host, NFS-Version
+- CIFS/SMB: Server, Freigabename, Domain (optional), Benutzername, Passwort, Mountpoint auf dem Host
+
+Zugangsdaten für CIFS werden **nicht** im Klartext in `/etc/fstab` gespeichert, sondern in einer separaten, auf `600` gesicherten Credentials-Datei unter `/etc/repmenu/credentials/`.
+
+**Automatische Wiederverbindung:**
+- Mounts nutzen `x-systemd.automount` (verbindet bei Zugriff automatisch neu, z.B. nach Netzwerkausfall oder Reboot)
+- Zusätzlich optional ein Cron-Sicherheitsnetz: prüft alle 5 Minuten, ob die Freigaben aktiv sind, und mountet sie bei Bedarf neu
+
+**Weitere Funktionen:**
+- Freigaben-Übersicht mit Live-Mount-Status
+- Freigabe entfernen (aushängen, fstab-Eintrag + Zugangsdaten entfernen)
+- Manueller Reconnect-Check auf Knopfdruck
+
+### Bereinigung (Fehlinstallationen, verwaister Kram)
+
+**Docker auf dem PVE-Host** – der Klassiker: aus Versehen `apt install docker.io` direkt auf dem Proxmox-Host statt in einer VM/LXC ausgeführt. Docker gehört dort nie hin (Konflikte mit cgroups/Netzwerk). Rapmenu kann:
+- **Prüfen**: zeigt installierte Docker/Containerd-Pakete, den Dienst-Status und vorhandene Datenverzeichnisse (`/var/lib/docker` etc.) mit Größenangabe
+- **Entfernen**: purgt alle Docker/Containerd-Pakete, löscht `/var/lib/docker`, `/var/lib/containerd`, `/etc/docker`, entfernt verwaiste Abhängigkeiten. Zweifache Sicherheitsabfrage, da nicht rückgängig zu machen
+
+**Weitere Aufräumfunktionen:**
+- Verwaiste Pakete entfernen (`apt-get autoremove --purge`, mit Vorschau vor dem Löschen)
+- Residual-Konfigurationen purgen (Pakete, die deinstalliert sind, aber noch Config-Reste hinterlassen haben)
+- Defekte Symlinks unter `/usr/local`, `/opt`, `/etc` finden und entfernen
+- Alte/große Dateien in `/tmp` und `/var/tmp` aufräumen (älter als 7 Tage, größer als 10MB)
+- APT-Paketcache leeren
+- Verwaiste ZFS-Datasets prüfen – findet `subvol-*`/`vm-*`-Datasets, deren zugehörige LXC/VM-ID nicht mehr existiert. Zeigt nur an, löscht **nicht** automatisch – das erfordert manuelle Prüfung
 
 ### System Repair
 - **Config-Dateien bearbeiten** mit automatischem Backup vor jeder Änderung (`/var/backups/repmenu`)
