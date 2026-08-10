@@ -71,20 +71,20 @@ Entfernt Skripte, Cron-Job und Alias. Backups und bestehende `pvesr`-Jobs bleibe
 
 ## Konfiguration
 
-ZFS-Pool-Name ist standardmäßig `ZFS2TB` (in `scripts/repmenu.sh`, Variable `ZPOOL_NAME`). Vor dem Push an deine Umgebung anpassen.
+ZFS-Pool-Name ist standardmäßig `ZFS2TB` (in `repmenu.sh`, Variable `ZPOOL_NAME`). Vor dem Push an deine Umgebung anpassen.
 
 Editor für die Config-Bearbeitung: `$EDITOR`, Fallback `nano`.
 
 ## Struktur
 
 ```
-repmenu/
+rapmenu/
+├── README.md
 ├── install.sh
-└── scripts/
-    ├── repmenu.sh                  # Hauptmenü
-    ├── auto-ha-replication.sh      # Findet/erstellt fehlende Replikations-Jobs
-    ├── sequential-replication.sh   # Führt alle Jobs nacheinander aus
-    └── uninstall.sh
+├── repmenu.sh                  # Hauptmenü
+├── auto-ha-replication.sh      # Findet/erstellt fehlende Replikations-Jobs
+├── sequential-replication.sh   # Führt alle Jobs nacheinander aus
+└── uninstall.sh
 ```
 
 ## Voraussetzungen

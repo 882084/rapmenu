@@ -79,10 +79,10 @@ ok "Verzeichnisse angelegt: $CONFIG_DIR, $LOG_DIR, $BACKUP_DIR"
 info "Lade Skripte herunter..."
 
 FILES=(
-    "scripts/repmenu.sh"
-    "scripts/auto-ha-replication.sh"
-    "scripts/sequential-replication.sh"
-    "scripts/uninstall.sh"
+    "repmenu.sh"
+    "auto-ha-replication.sh"
+    "sequential-replication.sh"
+    "uninstall.sh"
 )
 
 for FILE in "${FILES[@]}"; do
