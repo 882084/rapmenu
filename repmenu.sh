@@ -778,17 +778,14 @@ share_find_free_mp_slot() {
 }
 
 share_offer_lxc_bind() {
+    # Fuehrt den Bind-Mount OHNE erneute Rueckfrage aus (Ziel wurde bereits vorher gewaehlt)
     local NAME="$1"
     local HOST_MOUNTPOINT="$2"
-
-    if ! confirm "Freigabe \"$NAME\" jetzt zusaetzlich per Bind-Mount in einen LXC-Container einbinden?"; then
-        return
-    fi
 
     local CT_LIST
     CT_LIST=$(pct list 2>/dev/null | awk 'NR>1{print $1, $3}')
     if [ -z "$CT_LIST" ]; then
-        pause "Keine LXC-Container gefunden."
+        pause "Keine LXC-Container gefunden. Freigabe bleibt nur auf dem Host gemountet."
         return
     fi
 
@@ -798,7 +795,7 @@ share_offer_lxc_bind() {
     done <<< "$CT_LIST"
 
     local CTID
-    CTID=$(whiptail --title "Container waehlen" --menu "In welchen Container einbinden?" 20 70 10 "${CT_ITEMS[@]}" 3>&1 1>&2 2>&3)
+    CTID=$(whiptail --title "Container waehlen" --menu "In welchen Container soll die Freigabe eingebunden werden?" 20 78 10 "${CT_ITEMS[@]}" 3>&1 1>&2 2>&3)
     [ -z "${CTID:-}" ] && return
 
     local SLOT
@@ -812,7 +809,7 @@ share_offer_lxc_bind() {
     CT_PATH=$(whiptail --title "Pfad im Container" --inputbox "Unter welchem Pfad soll die Freigabe im Container erscheinen?" 10 70 "/mnt/$NAME" 3>&1 1>&2 2>&3)
     [ -z "$CT_PATH" ] && return
 
-    if confirm "Bind-Mount einrichten?\n\nHost:      $HOST_MOUNTPOINT\nContainer: $CTID (Slot mp$SLOT)\nZiel-Pfad: $CT_PATH\n\nHinweis: Container muss dafuer neu gestartet werden (oder mind. mp neu geladen werden)."; then
+    if confirm "Bind-Mount einrichten?\n\nHost:      $HOST_MOUNTPOINT\nContainer: $CTID (Slot mp$SLOT)\nZiel-Pfad: $CT_PATH\n\nHinweis: Container muss dafuer neu gestartet werden."; then
         run_and_show "pct set $CTID -mp$SLOT $HOST_MOUNTPOINT,mp=$CT_PATH" "Bind-Mount eingerichtet"
         log_action "Bind-Mount: $HOST_MOUNTPOINT -> CT $CTID:$CT_PATH (mp$SLOT)"
         if confirm "Container $CTID jetzt neustarten, damit der Mount aktiv wird?"; then
@@ -821,11 +818,120 @@ share_offer_lxc_bind() {
     fi
 }
 
+share_choose_target() {
+    whiptail --title "Ziel waehlen" --menu "Wohin soll die Freigabe eingebunden werden?\n\n(Technischer Hintergrund: LXC-Container koennen NFS/CIFS meist nicht direkt selbst mounten, daher ist 'LXC-Container' der empfohlene Standardweg ueber den Host.)" 20 96 3 \
+        "lxc" "LXC-Container (Host mountet, wird per Bind-Mount durchgereicht) - empfohlen" \
+        "host" "Nur auf dem PVE-Host mounten (kein Container)" \
+        "direct" "Direkt IM Container mounten (fortgeschritten, nur privilegierte Container)" \
+        3>&1 1>&2 2>&3
+}
+
+share_direct_nfs_in_container() {
+    local NAME="$1" SERVER="$2" EXPORT_PATH="$3" NFSVERS="$4"
+
+    local CT_LIST
+    CT_LIST=$(pct list 2>/dev/null | awk 'NR>1{print $1, $3}')
+    if [ -z "$CT_LIST" ]; then
+        pause "Keine LXC-Container gefunden."
+        return 1
+    fi
+    local CT_ITEMS=()
+    while read -r ID HNAME; do CT_ITEMS+=("$ID" "$HNAME"); done <<< "$CT_LIST"
+
+    local CTID
+    CTID=$(whiptail --title "Container waehlen" --menu "In welchem Container direkt mounten?" 20 78 10 "${CT_ITEMS[@]}" 3>&1 1>&2 2>&3)
+    [ -z "${CTID:-}" ] && return 1
+
+    local IS_PRIV
+    IS_PRIV=$(pct config "$CTID" 2>/dev/null | grep -q "^unprivileged: 1" && echo "0" || echo "1")
+    if [ "$IS_PRIV" == "0" ]; then
+        if ! confirm "Container $CTID ist UNPRIVILEGIERT. Direktes Mounten schlaegt damit sehr wahrscheinlich fehl (fehlende Rechte im Kernel-Namespace).\n\nTrotzdem versuchen?"; then
+            return 1
+        fi
+    fi
+
+    local CT_PATH
+    CT_PATH=$(whiptail --title "Pfad im Container" --inputbox "Wohin IM Container soll gemountet werden?" 10 70 "/mnt/$NAME" 3>&1 1>&2 2>&3)
+    [ -z "$CT_PATH" ] && return 1
+
+    local OPTS="_netdev,x-systemd.automount,x-systemd.mount-timeout=10,retry=3"
+    [ "$NFSVERS" != "auto" ] && OPTS="nfsvers=$NFSVERS,$OPTS"
+    local FSTAB_LINE="$SERVER:$EXPORT_PATH $CT_PATH nfs $OPTS 0 0 ${SHARES_MARKER_PREFIX}${NAME}"
+
+    run_and_show "pct exec $CTID -- bash -c 'apt-get update -qq && apt-get install -y nfs-common' && \
+        pct exec $CTID -- mkdir -p '$CT_PATH' && \
+        pct exec $CTID -- bash -c \"echo '$FSTAB_LINE' >> /etc/fstab\" && \
+        pct exec $CTID -- systemctl daemon-reload && \
+        pct exec $CTID -- mount -a && \
+        pct exec $CTID -- ls -la '$CT_PATH' && \
+        echo '--- Mount im Container erfolgreich ---'" "NFS direkt in Container $CTID - Ergebnis"
+
+    log_action "NFS direkt in Container $CTID gemountet: $SERVER:$EXPORT_PATH -> $CT_PATH"
+}
+
+share_direct_cifs_in_container() {
+    local NAME="$1" SERVER="$2" SHARE_NAME="$3" DOMAIN="$4" USERNAME="$5" PASSWORD="$6"
+
+    local CT_LIST
+    CT_LIST=$(pct list 2>/dev/null | awk 'NR>1{print $1, $3}')
+    if [ -z "$CT_LIST" ]; then
+        pause "Keine LXC-Container gefunden."
+        return 1
+    fi
+    local CT_ITEMS=()
+    while read -r ID HNAME; do CT_ITEMS+=("$ID" "$HNAME"); done <<< "$CT_LIST"
+
+    local CTID
+    CTID=$(whiptail --title "Container waehlen" --menu "In welchem Container direkt mounten?" 20 78 10 "${CT_ITEMS[@]}" 3>&1 1>&2 2>&3)
+    [ -z "${CTID:-}" ] && return 1
+
+    local IS_PRIV
+    IS_PRIV=$(pct config "$CTID" 2>/dev/null | grep -q "^unprivileged: 1" && echo "0" || echo "1")
+    if [ "$IS_PRIV" == "0" ]; then
+        if ! confirm "Container $CTID ist UNPRIVILEGIERT. Direktes Mounten schlaegt damit sehr wahrscheinlich fehl.\n\nTrotzdem versuchen?"; then
+            return 1
+        fi
+    fi
+
+    local CT_PATH
+    CT_PATH=$(whiptail --title "Pfad im Container" --inputbox "Wohin IM Container soll gemountet werden?" 10 70 "/mnt/$NAME" 3>&1 1>&2 2>&3)
+    [ -z "$CT_PATH" ] && return 1
+
+    # Credentials lokal temporaer bauen und in den Container pushen
+    local TMPCRED
+    TMPCRED=$(mktemp)
+    {
+        echo "username=$USERNAME"
+        echo "password=$PASSWORD"
+        [ -n "$DOMAIN" ] && echo "domain=$DOMAIN"
+    } > "$TMPCRED"
+
+    local CT_CRED_PATH="/etc/repmenu-cred-${NAME}.cred"
+    local OPTS="credentials=$CT_CRED_PATH,iocharset=utf8,_netdev,x-systemd.automount,x-systemd.mount-timeout=10"
+    local FSTAB_LINE="//$SERVER/$SHARE_NAME $CT_PATH cifs $OPTS 0 0 ${SHARES_MARKER_PREFIX}${NAME}"
+
+    run_and_show "pct exec $CTID -- bash -c 'apt-get update -qq && apt-get install -y cifs-utils' && \
+        pct push $CTID '$TMPCRED' '$CT_CRED_PATH' && \
+        pct exec $CTID -- chmod 600 '$CT_CRED_PATH' && \
+        pct exec $CTID -- mkdir -p '$CT_PATH' && \
+        pct exec $CTID -- bash -c \"echo '$FSTAB_LINE' >> /etc/fstab\" && \
+        pct exec $CTID -- systemctl daemon-reload && \
+        pct exec $CTID -- mount -a && \
+        pct exec $CTID -- ls -la '$CT_PATH' && \
+        echo '--- Mount im Container erfolgreich ---'" "CIFS direkt in Container $CTID - Ergebnis"
+
+    rm -f "$TMPCRED"
+    log_action "CIFS direkt in Container $CTID gemountet: //$SERVER/$SHARE_NAME -> $CT_PATH"
+}
+
 share_add_nfs() {
-    local NAME SERVER EXPORT_PATH MOUNTPOINT NFSVERS
+    local NAME SERVER EXPORT_PATH MOUNTPOINT NFSVERS TARGET
 
     NAME=$(share_ask_name)
     [ -z "$NAME" ] && return
+
+    TARGET=$(share_choose_target)
+    [ -z "${TARGET:-}" ] && return
 
     SERVER=$(whiptail --title "NFS-Server" --inputbox "IP-Adresse oder Hostname des NFS-Servers:" 10 70 3>&1 1>&2 2>&3)
     [ -z "$SERVER" ] && return
@@ -833,15 +939,20 @@ share_add_nfs() {
     EXPORT_PATH=$(whiptail --title "Export-Pfad" --inputbox "Freigegebener Pfad auf dem Server (z.B. /volume1/data):" 10 70 3>&1 1>&2 2>&3)
     [ -z "$EXPORT_PATH" ] && return
 
-    MOUNTPOINT=$(whiptail --title "Mountpoint auf dem PVE-Host" --inputbox "Wohin soll auf DIESEM Proxmox-Host gemountet werden?" 10 70 "/mnt/pve/$NAME" 3>&1 1>&2 2>&3)
-    [ -z "$MOUNTPOINT" ] && return
-
     NFSVERS=$(whiptail --title "NFS-Version" --menu "Welche NFS-Version verwenden?" 15 60 3 \
         "4" "NFSv4 (Standard, empfohlen)" \
         "3" "NFSv3 (aeltere NAS-Systeme)" \
         "auto" "Automatisch aushandeln" \
         3>&1 1>&2 2>&3)
     [ -z "$NFSVERS" ] && NFSVERS="4"
+
+    if [ "$TARGET" == "direct" ]; then
+        share_direct_nfs_in_container "$NAME" "$SERVER" "$EXPORT_PATH" "$NFSVERS"
+        return
+    fi
+
+    MOUNTPOINT=$(whiptail --title "Mountpoint auf dem PVE-Host" --inputbox "Wohin soll auf DIESEM Proxmox-Host gemountet werden?" 10 70 "/mnt/pve/$NAME" 3>&1 1>&2 2>&3)
+    [ -z "$MOUNTPOINT" ] && return
 
     mkdir -p "$MOUNTPOINT"
 
@@ -860,14 +971,19 @@ share_add_nfs() {
 
     log_action "NFS-Freigabe hinzugefuegt: $NAME ($SERVER:$EXPORT_PATH -> $MOUNTPOINT)"
 
-    share_offer_lxc_bind "$NAME" "$MOUNTPOINT"
+    if [ "$TARGET" == "lxc" ]; then
+        share_offer_lxc_bind "$NAME" "$MOUNTPOINT"
+    fi
 }
 
 share_add_cifs() {
-    local NAME SERVER SHARE_NAME DOMAIN USERNAME PASSWORD MOUNTPOINT
+    local NAME SERVER SHARE_NAME DOMAIN USERNAME PASSWORD MOUNTPOINT TARGET
 
     NAME=$(share_ask_name)
     [ -z "$NAME" ] && return
+
+    TARGET=$(share_choose_target)
+    [ -z "${TARGET:-}" ] && return
 
     SERVER=$(whiptail --title "CIFS/SMB-Server" --inputbox "IP-Adresse oder Hostname des Servers:" 10 70 3>&1 1>&2 2>&3)
     [ -z "$SERVER" ] && return
@@ -882,6 +998,11 @@ share_add_cifs() {
 
     PASSWORD=$(whiptail --title "Passwort" --passwordbox "Passwort fuer $USERNAME:" 10 70 3>&1 1>&2 2>&3)
     [ -z "$PASSWORD" ] && return
+
+    if [ "$TARGET" == "direct" ]; then
+        share_direct_cifs_in_container "$NAME" "$SERVER" "$SHARE_NAME" "$DOMAIN" "$USERNAME" "$PASSWORD"
+        return
+    fi
 
     MOUNTPOINT=$(whiptail --title "Mountpoint auf dem PVE-Host" --inputbox "Wohin soll auf DIESEM Proxmox-Host gemountet werden?" 10 70 "/mnt/pve/$NAME" 3>&1 1>&2 2>&3)
     [ -z "$MOUNTPOINT" ] && return
@@ -908,7 +1029,9 @@ share_add_cifs() {
 
     log_action "CIFS-Freigabe hinzugefuegt: $NAME (//$SERVER/$SHARE_NAME -> $MOUNTPOINT)"
 
-    share_offer_lxc_bind "$NAME" "$MOUNTPOINT"
+    if [ "$TARGET" == "lxc" ]; then
+        share_offer_lxc_bind "$NAME" "$MOUNTPOINT"
+    fi
 }
 
 share_list() {
@@ -1501,7 +1624,7 @@ logs_menu() {
 
 main_menu() {
     while true; do
-        CHOICE=$(whiptail --title "Rapmenu v$VERSION" --menu "Hauptmenue - Kategorie waehlen:" 24 78 8 \
+        CHOICE=$(whiptail --title "Rapmenu v$VERSION" --menu "Hauptmenue - Kategorie waehlen:" 26 78 9 \
             "1" "Replikation" \
             "2" "Cron-Jobs" \
             "3" "Netzwerkfreigaben (NFS/CIFS)" \

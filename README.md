@@ -88,17 +88,21 @@ Beim ersten Backup-Job wird einmalig nach dem Ziel-Storage gefragt (aus `pvesm s
 
 ### Netzwerkfreigaben (NFS/CIFS)
 
-Verbindet NFS- oder CIFS/SMB-Freigaben mit dem Proxmox-Host und optional per Bind-Mount mit einem LXC-Container – komplett per Menüabfrage, kein manuelles fstab-Editieren nötig.
+Verbindet NFS- oder CIFS/SMB-Freigaben – du wählst **zuerst das Ziel**, dann werden passend dazu die nötigen Details abgefragt:
 
-**Wichtiger Hintergrund:** LXC-Container (besonders unprivilegierte) können NFS/CIFS meist nicht direkt selbst mounten. Der saubere Weg: der **Proxmox-Host** mountet die Freigabe, der Container bekommt sie per `pct set <ID> -mpX <hostpfad>,mp=<containerpfad>` durchgereicht. Rapmenu bietet das automatisch als letzten Schritt nach dem Einrichten der Freigabe an.
+1. **LXC-Container** (empfohlen, Standard) – Host mountet die Freigabe, wird per Bind-Mount in einen von dir gewählten Container durchgereicht
+2. **Nur PVE-Host** – Freigabe wird ausschließlich auf dem Host gemountet, kein Container beteiligt
+3. **Direkt im Container** (fortgeschritten) – mountet die Freigabe direkt innerhalb des Containers selbst, ohne den Host-Umweg. Funktioniert nur bei **privilegierten** Containern zuverlässig; bei unprivilegierten warnt das Tool vorher deutlich, da es meist an fehlenden Kernel-Namespace-Rechten scheitert
+
+**Wichtiger Hintergrund zu Option 1 (Standard):** LXC-Container (besonders unprivilegierte) können NFS/CIFS meist nicht direkt selbst mounten. Der saubere Weg: der **Proxmox-Host** mountet die Freigabe, der Container bekommt sie per `pct set <ID> -mpX <hostpfad>,mp=<containerpfad>` durchgereicht.
 
 **Abgefragte Daten:**
-- NFS: Server-IP/Hostname, Export-Pfad, Mountpoint auf dem Host, NFS-Version
-- CIFS/SMB: Server, Freigabename, Domain (optional), Benutzername, Passwort, Mountpoint auf dem Host
+- NFS: Server-IP/Hostname, Export-Pfad, NFS-Version, (bei Ziel Host/LXC:) Mountpoint auf dem Host
+- CIFS/SMB: Server, Freigabename, Domain (optional), Benutzername, Passwort, (bei Ziel Host/LXC:) Mountpoint auf dem Host
 
-Zugangsdaten für CIFS werden **nicht** im Klartext in `/etc/fstab` gespeichert, sondern in einer separaten, auf `600` gesicherten Credentials-Datei unter `/etc/repmenu/credentials/`.
+Zugangsdaten für CIFS werden **nicht** im Klartext in `/etc/fstab` gespeichert, sondern in einer separaten, auf `600` gesicherten Credentials-Datei (bei Ziel "Direkt im Container" wird die Datei per `pct push` direkt in den Container übertragen).
 
-**Automatische Wiederverbindung:**
+**Automatische Wiederverbindung** (bei Host-basierten Zielen):
 - Mounts nutzen `x-systemd.automount` (verbindet bei Zugriff automatisch neu, z.B. nach Netzwerkausfall oder Reboot)
 - Zusätzlich optional ein Cron-Sicherheitsnetz: prüft alle 5 Minuten, ob die Freigaben aktiv sind, und mountet sie bei Bedarf neu
 
