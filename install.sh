@@ -1,35 +1,44 @@
 #!/bin/bash
-#
-# install.sh - Installation von CronJobs-Proxmox
-#
+# ==========================================================
+# CronJobs-Proxmox - Installation
+# ==========================================================
 # In einer Zeile installieren:
 #   bash -c "$(wget -qLO - https://raw.githubusercontent.com/882084/rapmenu/main/install.sh)"
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/882084/rapmenu/main/install.sh)"
+# ==========================================================
 
 set -euo pipefail
 
 REPO_RAW="https://raw.githubusercontent.com/882084/rapmenu/main"
-INSTALL_DIR="/usr/local/bin"
+BASE_DIR="/usr/local/share/cronjobs-proxmox"
+BIN_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/cronjobs-proxmox"
 LOG_DIR="/var/log/cronjobs-proxmox"
 BACKUP_DIR="/var/backups/cronjobs-proxmox"
 HELPER_DIR="/usr/local/bin/cronjobs-proxmox-skripte"
-HAUPTSKRIPT="cronjobs-proxmox.sh"
 
-GRUEN='\033[0;32m'
-GELB='\033[1;33m'
-BLAU='\033[0;34m'
-ROT='\033[0;31m'
-NC='\033[0m'
-
-info()  { echo -e "${BLAU}[info]${NC} $*"; }
-ok()    { echo -e "${GRUEN}[ok]${NC} $*"; }
-warn()  { echo -e "${GELB}[hinweis]${NC} $*"; }
+GRUEN='\033[0;32m'; GELB='\033[1;33m'; BLAU='\033[0;34m'; ROT='\033[0;31m'; NC='\033[0m'
+info()   { echo -e "${BLAU}[info]${NC} $*"; }
+ok()     { echo -e "${GRUEN}[ok]${NC} $*"; }
+warn()   { echo -e "${GELB}[hinweis]${NC} $*"; }
 fehler() { echo -e "${ROT}[fehler]${NC} $*"; exit 1; }
 
-if [ "$EUID" -ne 0 ]; then
-    fehler "Bitte als Administrator (root) ausfuehren."
-fi
+# Alle Dateien des Werkzeugs
+DATEIEN=(
+    "cronjobs-proxmox.sh"
+    "version.txt"
+    "lib/utils.sh"
+    "cron/definitions.sh"
+    "cron/install_jobs.sh"
+    "health/checks.sh"
+    "menus/main_menu.sh"
+    "menus/status_menu.sh"
+    "menus/cron_menu.sh"
+    "menus/repair_menu.sh"
+    "menus/logs_menu.sh"
+    "menus/help_menu.sh"
+)
+
+[ "$EUID" -ne 0 ] && fehler "Bitte als Administrator (root) ausfuehren."
 
 echo ""
 echo "=================================================="
@@ -43,6 +52,7 @@ if ! command -v pveversion &> /dev/null; then
     [[ "$A" =~ ^[Jj]$ ]] || exit 1
 fi
 
+# ── Abhaengigkeiten ─────────────────────────────────────
 info "Pruefe benoetigte Programme ..."
 if ! command -v whiptail &> /dev/null; then
     info "whiptail fehlt, wird installiert ..."
@@ -53,7 +63,8 @@ else
 fi
 
 if ! command -v smartctl &> /dev/null; then
-    warn "smartmontools fehlt (wird fuer die Festplatten-Pruefung gebraucht)"
+    warn "smartmontools fehlt - ohne das Programm kann der Zustand"
+    warn "der Festplatten nicht geprueft werden."
     read -rp "Jetzt mitinstallieren? [J/n] " A
     if [[ ! "$A" =~ ^[Nn]$ ]]; then
         apt-get install -y smartmontools -qq && ok "smartmontools installiert"
@@ -64,60 +75,77 @@ DOWNLOADER=""
 for CMD in wget curl; do
     command -v "$CMD" &> /dev/null && { DOWNLOADER="$CMD"; break; }
 done
-[ -z "$DOWNLOADER" ] && fehler "Weder wget noch curl gefunden. Bitte eines davon installieren."
 
 hole() {
-    if [ "$DOWNLOADER" == "wget" ]; then
-        wget -qO "$2" "$1"
-    else
-        curl -fsSL "$1" -o "$2"
-    fi
+    if [ "$DOWNLOADER" == "wget" ]; then wget -qO "$2" "$1"; else curl -fsSL "$1" -o "$2"; fi
 }
 
-mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$LOG_DIR" "$BACKUP_DIR" "$HELPER_DIR"
+# ── Verzeichnisse ───────────────────────────────────────
+mkdir -p "$BASE_DIR"/{lib,cron,health,menus} "$CONFIG_DIR" "$LOG_DIR" "$BACKUP_DIR" "$HELPER_DIR"
 ok "Verzeichnisse angelegt"
 
-info "Lade Dateien herunter ..."
-QUELLE_LOKAL="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+# ── Dateien installieren ────────────────────────────────
+QUELLE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+LOKAL=0
+[ -f "$QUELLE/cronjobs-proxmox.sh" ] && [ -d "$QUELLE/menus" ] && LOKAL=1
 
-for DATEI in "$HAUPTSKRIPT" "uninstall.sh"; do
-    if [ -f "$QUELLE_LOKAL/$DATEI" ]; then
-        cp -f "$QUELLE_LOKAL/$DATEI" "$INSTALL_DIR/$DATEI"
-        ok "kopiert: $INSTALL_DIR/$DATEI"
+if [ "$LOKAL" -eq 1 ]; then
+    info "Installiere aus dem lokalen Verzeichnis ..."
+else
+    info "Lade Dateien herunter ..."
+    [ -z "$DOWNLOADER" ] && fehler "Weder wget noch curl gefunden. Bitte eines davon installieren."
+fi
+
+for DATEI in "${DATEIEN[@]}"; do
+    ZIEL="$BASE_DIR/$DATEI"
+    mkdir -p "$(dirname "$ZIEL")"
+    if [ "$LOKAL" -eq 1 ]; then
+        cp -f "$QUELLE/$DATEI" "$ZIEL"
     else
-        hole "$REPO_RAW/$DATEI" "$INSTALL_DIR/$DATEI"
-        ok "geladen:  $INSTALL_DIR/$DATEI"
+        hole "$REPO_RAW/$DATEI" "$ZIEL" || fehler "Konnte $DATEI nicht laden."
     fi
-    chmod +x "$INSTALL_DIR/$DATEI"
+    case "$DATEI" in *.sh) chmod +x "$ZIEL" ;; esac
 done
+ok "${#DATEIEN[@]} Dateien installiert nach $BASE_DIR"
 
-# Kurzer Startbefehl ohne .sh
-ln -sf "$INSTALL_DIR/$HAUPTSKRIPT" "$INSTALL_DIR/cronjobs-proxmox"
+# Deinstallations-Skript
+if [ "$LOKAL" -eq 1 ] && [ -f "$QUELLE/uninstall.sh" ]; then
+    cp -f "$QUELLE/uninstall.sh" "$BIN_DIR/uninstall-cronjobs-proxmox.sh"
+else
+    hole "$REPO_RAW/uninstall.sh" "$BIN_DIR/uninstall-cronjobs-proxmox.sh" || true
+fi
+chmod +x "$BIN_DIR/uninstall-cronjobs-proxmox.sh" 2>/dev/null || true
+
+# ── Startbefehl ─────────────────────────────────────────
+ln -sf "$BASE_DIR/cronjobs-proxmox.sh" "$BIN_DIR/cronjobs-proxmox"
 ok "Startbefehl angelegt: cronjobs-proxmox"
 
-# Alte Version (Rapmenu) sauber ablegen, falls vorhanden
-if [ -f "$INSTALL_DIR/repmenu.sh" ]; then
-    warn "Eine aeltere Version (repmenu) wurde gefunden."
-    read -rp "Alte Version jetzt entfernen? [J/n] " A
-    if [[ ! "$A" =~ ^[Nn]$ ]]; then
-        rm -f "$INSTALL_DIR/repmenu.sh" "$INSTALL_DIR/auto-ha-replication.sh" "$INSTALL_DIR/sequential-replication.sh"
-        sed -i '/alias repmenu=/d' /root/.bashrc 2>/dev/null || true
-        ok "Alte Version entfernt (Cron-Jobs und Backups blieben erhalten)"
+# ── Reste aelterer Versionen ────────────────────────────
+for ALT in repmenu.sh auto-ha-replication.sh sequential-replication.sh cronjobs-proxmox.sh; do
+    if [ -f "$BIN_DIR/$ALT" ] && [ ! -L "$BIN_DIR/$ALT" ]; then
+        rm -f "$BIN_DIR/$ALT"
+        ok "Aeltere Datei entfernt: $BIN_DIR/$ALT"
     fi
+done
+sed -i '/alias repmenu=/d' /root/.bashrc 2>/dev/null || true
+
+if [ -d /etc/repmenu ] || [ -f /etc/cron.d/repmenu-jobs ]; then
+    warn "Es wurde eine Installation der Vorgaengerversion (Rapmenu) gefunden."
+    warn "Deren Cron-Jobs laufen weiter, bis du sie entfernst:"
+    warn "  /etc/cron.d/repmenu-jobs"
 fi
 
 cat > "$CONFIG_DIR/installation.txt" << EOF
 # CronJobs-Proxmox - Installationsinformationen
-# Wird bei der Deinstallation gelesen, bitte nicht bearbeiten.
-INSTALL_DIR=$INSTALL_DIR
+BASE_DIR=$BASE_DIR
 CONFIG_DIR=$CONFIG_DIR
 LOG_DIR=$LOG_DIR
 BACKUP_DIR=$BACKUP_DIR
 HELPER_DIR=$HELPER_DIR
 CRON_FILE=/etc/cron.d/cronjobs-proxmox
+VERSION=$(cat "$BASE_DIR/version.txt" 2>/dev/null || echo unbekannt)
 INSTALLIERT_AM=$(date '+%d.%m.%Y %H:%M:%S')
 EOF
-ok "Installationsinformationen gespeichert"
 
 echo ""
 echo "=================================================="
@@ -128,17 +156,13 @@ echo "  Menue starten mit:"
 echo ""
 echo "      cronjobs-proxmox"
 echo ""
-echo "  Erster Schritt: im Menue den Punkt 'Hilfe' oeffnen -"
-echo "  dort steht in wenigen Zeilen, was du zuerst aktivieren"
-echo "  solltest."
-echo ""
-warn "Der Reparatur-Bereich veraendert echte Systemeinstellungen."
-warn "Vor jeder Aenderung wird automatisch eine Kopie angelegt."
+echo "  Der erste Bildschirm zeigt dir den Zustand deines"
+echo "  Servers und was du als naechstes tun solltest."
 echo ""
 
 if [ -t 0 ]; then
     read -rp "Menue jetzt starten? [J/n] " START
     if [[ ! "$START" =~ ^[Nn]$ ]]; then
-        exec "$INSTALL_DIR/$HAUPTSKRIPT"
+        exec "$BASE_DIR/cronjobs-proxmox.sh"
     fi
 fi

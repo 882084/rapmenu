@@ -8,7 +8,8 @@
 
 set -uo pipefail
 
-INSTALL_DIR="/usr/local/bin"
+BASE_DIR="/usr/local/share/cronjobs-proxmox"
+BIN_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/cronjobs-proxmox"
 LOG_DIR="/var/log/cronjobs-proxmox"
 BACKUP_DIR="/var/backups/cronjobs-proxmox"
@@ -74,16 +75,20 @@ if [ -d "$HELPER_DIR" ]; then
 fi
 
 # --- Programmdateien ---
-for F in cronjobs-proxmox.sh cronjobs-proxmox; do
-    if [ -e "$INSTALL_DIR/$F" ]; then
-        rm -f "$INSTALL_DIR/$F"
-        ok "Entfernt: $INSTALL_DIR/$F"
+if [ -d "$BASE_DIR" ]; then
+    rm -rf "$BASE_DIR"
+    ok "Programmdateien entfernt: $BASE_DIR"
+fi
+for F in cronjobs-proxmox cronjobs-proxmox.sh uninstall-cronjobs-proxmox.sh; do
+    if [ -e "$BIN_DIR/$F" ]; then
+        rm -f "$BIN_DIR/$F"
+        ok "Entfernt: $BIN_DIR/$F"
     fi
 done
 
 # --- Reste der alten Version ---
 for F in repmenu.sh auto-ha-replication.sh sequential-replication.sh; do
-    [ -f "$INSTALL_DIR/$F" ] && { rm -f "$INSTALL_DIR/$F"; ok "Alte Datei entfernt: $F"; }
+    [ -f "$BIN_DIR/$F" ] && { rm -f "$BIN_DIR/$F"; ok "Alte Datei entfernt: $F"; }
 done
 sed -i '/alias repmenu=/d' /root/.bashrc 2>/dev/null || true
 
@@ -124,5 +129,5 @@ echo ""
 ok "Deinstallation abgeschlossen."
 
 SELBST="$(readlink -f "$0")"
-[ "$SELBST" == "$INSTALL_DIR/uninstall.sh" ] && rm -f "$SELBST"
+[ "$SELBST" == "$BIN_DIR/uninstall-cronjobs-proxmox.sh" ] && rm -f "$SELBST"
 exit 0
