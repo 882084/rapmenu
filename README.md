@@ -20,6 +20,8 @@ cronjobs-proxmox
 
 Pfeiltasten bewegen die Auswahl, Enter bestätigt, die Leertaste wählt in Checklisten an und ab, Escape geht zurück. Der Cursor steht immer schon auf dem Auswahl-Knopf, ein Druck auf Enter genügt also.
 
+Alle Fenster passen sich der tatsächlichen Größe des Terminals an. Auf schmalen Terminals (80 Spalten) zeigen die Listen nur die Skriptnamen, auf breiten zusätzlich die Kurzbeschreibung – es läuft nie etwas über den Fensterrand hinaus.
+
 ## Bereich 1: Cron-Jobs
 
 Cron-Jobs sind Aufgaben, die der Server von selbst zu einer festgelegten Zeit erledigt, zum Beispiel jede Nacht um zwei Uhr eine Sicherung erstellen. Einmal ausgewählt laufen sie automatisch weiter.

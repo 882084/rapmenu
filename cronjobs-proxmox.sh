@@ -32,7 +32,81 @@ BTN_OK="Auswaehlen"
 BTN_BACK="Zurueck"
 
 # ================================================================
-# HILFSFUNKTIONEN
+# DARSTELLUNG - Fenstergroessen und Textlaengen
+# ================================================================
+#
+# Alle Fenster passen sich an die tatsaechliche Groesse des Terminals
+# an und zu lange Zeilen werden gekuerzt. Damit laeuft nie etwas ueber
+# den Fensterrand hinaus, egal ob das Terminal 80 oder 200 Zeichen
+# breit ist.
+
+term_cols() {
+    local C
+    C=$(tput cols 2>/dev/null) || C=""
+    [ -z "$C" ] && C=$(stty size 2>/dev/null | awk '{print $2}')
+    [ -z "$C" ] && C=80
+    echo "$C"
+}
+
+term_rows() {
+    local R
+    R=$(tput lines 2>/dev/null) || R=""
+    [ -z "$R" ] && R=$(stty size 2>/dev/null | awk '{print $1}')
+    [ -z "$R" ] && R=24
+    echo "$R"
+}
+
+dlg_w() {
+    # Gewuenschte Breite, begrenzt auf das was ins Terminal passt
+    local WANT="${1:-80}" MAX
+    MAX=$(( $(term_cols) - 6 ))
+    [ "$MAX" -lt 56 ] && MAX=56
+    [ "$WANT" -gt "$MAX" ] && WANT="$MAX"
+    [ "$WANT" -lt 56 ] && WANT=56
+    echo "$WANT"
+}
+
+dlg_h() {
+    local WANT="${1:-20}" MAX
+    MAX=$(( $(term_rows) - 2 ))
+    [ "$MAX" -lt 12 ] && MAX=12
+    [ "$WANT" -gt "$MAX" ] && WANT="$MAX"
+    [ "$WANT" -lt 12 ] && WANT=12
+    echo "$WANT"
+}
+
+kuerzen() {
+    # Kuerzt einen Text auf die angegebene Laenge und haengt ... an
+    local T="$1" M="${2:-40}"
+    [ "$M" -lt 8 ] && M=8
+    if [ "${#T}" -gt "$M" ]; then
+        printf '%s...' "${T:0:$((M-3))}"
+    else
+        printf '%s' "$T"
+    fi
+}
+
+fuellen() {
+    # Fuellt einen Text rechts mit Leerzeichen auf feste Breite auf,
+    # damit die Spalten in den Listen sauber untereinander stehen
+    printf '%-*s' "$2" "$(kuerzen "$1" "$2")"
+}
+
+# Breite der Namensspalte in den Job-Listen. Ist das Terminal zu schmal,
+# wird die Beschreibungsspalte ganz weggelassen (Rueckgabe 0), damit keine
+# auf drei Buchstaben zerhackten Textfetzen entstehen. Die Beschreibungen
+# sind dann ueber den Menuepunkt "Beschreibungen ansehen" erreichbar.
+job_spalten() {
+    # $1 = nutzbare Breite der Zeile -> gibt "NAMENSBREITE BESCHREIBUNGSBREITE" aus
+    local PLATZ="$1" NAME=44 REST
+    [ "$PLATZ" -lt "$NAME" ] && NAME="$PLATZ"
+    REST=$(( PLATZ - NAME - 1 ))
+    [ "$REST" -lt 18 ] && REST=0
+    echo "$NAME $REST"
+}
+
+# ================================================================
+# DIALOGE
 # ================================================================
 
 # Menue-Dialog. Der Fokus liegt immer auf dem Auswahl-Button (whiptail-Standard,
@@ -41,28 +115,94 @@ BTN_BACK="Zurueck"
 # damit man nach dem Schliessen eines Info-Fensters an derselben Stelle steht.
 menu_dialog() {
     # $1=Titel  $2=Text  $3=Hoehe  $4=Breite  $5=Listenhoehe  $6=Vorauswahl  Rest=Eintraege
-    local TITLE="$1" TEXT="$2" H="$3" W="$4" LH="$5" DEF="$6"
+    local TITLE="$1" TEXT="$2" H W LH DEF="$6"
+    H=$(dlg_h "$3")
+    W=$(dlg_w "$4")
+    LH="$5"
     shift 6
+
+    local -a ITEMS=("$@")
+    local I MAXTAG=0
+    for ((I=0; I<${#ITEMS[@]}; I+=2)); do
+        [ "${#ITEMS[I]}" -gt "$MAXTAG" ] && MAXTAG="${#ITEMS[I]}"
+    done
+
+    # Nutzbare Breite fuer den Beschreibungstext einer Zeile
+    local PLATZ=$(( W - MAXTAG - 9 ))
+    [ "$PLATZ" -lt 12 ] && PLATZ=12
+    for ((I=1; I<${#ITEMS[@]}; I+=2)); do
+        ITEMS[I]=$(kuerzen "${ITEMS[I]}" "$PLATZ")
+    done
+
+    # Listenhoehe an die Fensterhoehe anpassen
+    local MAXLH=$(( H - 9 ))
+    [ "$MAXLH" -lt 3 ] && MAXLH=3
+    [ "$LH" -gt "$MAXLH" ] && LH="$MAXLH"
+    local ANZ=$(( ${#ITEMS[@]} / 2 ))
+    [ "$LH" -gt "$ANZ" ] && LH="$ANZ"
+    [ "$LH" -lt 1 ] && LH=1
+
     if [ -n "$DEF" ]; then
-        whiptail --title "$TITLE" \
+        whiptail --title " $TITLE " \
             --ok-button "$BTN_OK" --cancel-button "$BTN_BACK" \
             --default-item "$DEF" \
-            --menu "$TEXT" "$H" "$W" "$LH" "$@" 3>&1 1>&2 2>&3
+            --menu "$TEXT" "$H" "$W" "$LH" "${ITEMS[@]}" 3>&1 1>&2 2>&3
     else
-        whiptail --title "$TITLE" \
+        whiptail --title " $TITLE " \
             --ok-button "$BTN_OK" --cancel-button "$BTN_BACK" \
-            --menu "$TEXT" "$H" "$W" "$LH" "$@" 3>&1 1>&2 2>&3
+            --menu "$TEXT" "$H" "$W" "$LH" "${ITEMS[@]}" 3>&1 1>&2 2>&3
     fi
+}
+
+checklist_dialog() {
+    # $1=Titel  $2=Text  $3=Hoehe  $4=Breite  $5=Listenhoehe  Rest=Eintraege (Tag Text Status)
+    local TITLE="$1" TEXT="$2" H W LH
+    H=$(dlg_h "$3")
+    W=$(dlg_w "$4")
+    LH="$5"
+    shift 5
+
+    local -a ITEMS=("$@")
+    local I MAXTAG=0
+    for ((I=0; I<${#ITEMS[@]}; I+=3)); do
+        [ "${#ITEMS[I]}" -gt "$MAXTAG" ] && MAXTAG="${#ITEMS[I]}"
+    done
+
+    # Zusaetzlich zum Menue noch Platz fuer das Auswahlkaestchen "[ ] "
+    local PLATZ=$(( W - MAXTAG - 13 ))
+    [ "$PLATZ" -lt 12 ] && PLATZ=12
+    for ((I=1; I<${#ITEMS[@]}; I+=3)); do
+        ITEMS[I]=$(kuerzen "${ITEMS[I]}" "$PLATZ")
+    done
+
+    local MAXLH=$(( H - 9 ))
+    [ "$MAXLH" -lt 3 ] && MAXLH=3
+    [ "$LH" -gt "$MAXLH" ] && LH="$MAXLH"
+    local ANZ=$(( ${#ITEMS[@]} / 3 ))
+    [ "$LH" -gt "$ANZ" ] && LH="$ANZ"
+    [ "$LH" -lt 1 ] && LH=1
+
+    whiptail --title " $TITLE " \
+        --ok-button "Uebernehmen" --cancel-button "$BTN_BACK" \
+        --checklist "$TEXT" "$H" "$W" "$LH" "${ITEMS[@]}" 3>&1 1>&2 2>&3
+}
+
+eingabe_dialog() {
+    # $1=Titel  $2=Text  $3=Vorgabewert
+    whiptail --title " $1 " --ok-button "$BTN_OK" --cancel-button "Abbrechen" \
+        --inputbox "$2" "$(dlg_h 14)" "$(dlg_w 72)" "${3:-}" 3>&1 1>&2 2>&3
 }
 
 info_box() {
     # Info-Fenster, das mit Enter oder ESC geschlossen wird
-    whiptail --title "${2:-Information}" --ok-button "Schliessen" --msgbox "$1" 20 78
+    whiptail --title " ${2:-Information} " --ok-button "Schliessen" \
+        --msgbox "$1" "$(dlg_h 20)" "$(dlg_w 76)"
 }
 
 info_textbox() {
     # Grosses, scrollbares Info-Fenster aus einer Datei
-    whiptail --title "${2:-Information}" --ok-button "Schliessen" --scrolltext --textbox "$1" 28 100
+    whiptail --title " ${2:-Information} " --ok-button "Schliessen" --scrolltext \
+        --textbox "$1" "$(dlg_h 30)" "$(dlg_w 98)"
 }
 
 pause() {
@@ -71,13 +211,14 @@ pause() {
 
 confirm() {
     # Fokus liegt auf "Ja" (kein --defaultno)
-    whiptail --title "${2:-Bestaetigen}" --yes-button "Ja" --no-button "Nein" --yesno "$1" 16 78
+    whiptail --title " ${2:-Bestaetigen} " --yes-button "Ja" --no-button "Nein" \
+        --yesno "$1" "$(dlg_h 18)" "$(dlg_w 76)"
 }
 
 confirm_risky() {
     # Fuer gefaehrliche Aktionen: Fokus bewusst auf "Nein"
-    whiptail --title "${2:-ACHTUNG}" --yes-button "Ja, ausfuehren" --no-button "Abbrechen" \
-        --defaultno --yesno "$1" 20 78
+    whiptail --title " ${2:-ACHTUNG} " --yes-button "Ja, ausfuehren" --no-button "Abbrechen" \
+        --defaultno --yesno "$1" "$(dlg_h 22)" "$(dlg_w 76)"
 }
 
 run_and_show() {
@@ -131,18 +272,22 @@ conf_set() {
 # ================================================================
 # KATEGORIEN (Zugehoerigkeitsnamen)
 # ================================================================
-# Format: Kuerzel|Anzeigename der Kategorie
+# Format: Kuerzel|Kurzname (Menue)|Beschreibung (Untermenue)
 
 CATEGORIES=(
-"sicherung|Sicherung - Backups von VMs und Containern"
-"snapshots|Momentaufnahmen - Snapshots erstellen und aufraeumen"
-"speicher|Speicher und ZFS - Festplatten, Pools, Speicherplatz"
-"wartung|System-Wartung - Updates, Kernel, Logs, Aufraeumen"
-"sicherheit|Sicherheit - Zertifikate, Anmeldungen, Sicherheitsupdates"
-"cluster|Cluster und Hochverfuegbarkeit - Quorum, HA, Replikation"
-"netzwerk|Netzwerk - Verbindungen, DNS, Freigaben"
-"konfiguration|Konfiguration und Berichte - Einstellungen sichern, Reports"
+"sicherung|Sicherung|Backups von VMs und Containern erstellen, pruefen und aufraeumen"
+"snapshots|Momentaufnahmen|Snapshots erstellen und alte automatisch aufraeumen"
+"speicher|Speicher und ZFS|Festplatten, ZFS-Pools und freier Speicherplatz"
+"wartung|System-Wartung|Updates, Kernel, Protokolle und Aufraeumarbeiten"
+"sicherheit|Sicherheit|Zertifikate, Anmeldeversuche und Sicherheitsupdates"
+"cluster|Cluster und HA|Quorum, Hochverfuegbarkeit und Replikation"
+"netzwerk|Netzwerk|Verbindungen, Namensaufloesung und Freigaben"
+"konfiguration|Konfiguration|Einstellungen sichern und regelmaessige Berichte"
 )
+
+cat_field() {
+    echo "$1" | awk -F'|' -v f="$2" '{print $f}'
+}
 
 # ================================================================
 # CRON-JOB-DEFINITIONEN
@@ -326,8 +471,8 @@ EOS
         ;;
 
     sicherung-alte-loeschen-woechentlich)
-        DAYS=$(whiptail --title "Aufbewahrungsdauer" --ok-button "$BTN_OK" \
-            --inputbox "Wie viele Tage sollen Sicherungen aufbewahrt werden?\n\nAeltere Sicherungen werden dann automatisch geloescht.\nEmpfehlung: 30 Tage." 14 70 "30" 3>&1 1>&2 2>&3)
+        DAYS=$(eingabe_dialog "Aufbewahrungsdauer" \
+            "Wie viele Tage sollen Sicherungen aufbewahrt werden?\n\nAeltere Sicherungen werden dann automatisch geloescht.\nEmpfehlung: 30 Tage." "30")
         [ -z "${DAYS:-}" ] && DAYS=30
         write_helper "backup-alte-loeschen.sh" <<EOS
 #!/bin/bash
@@ -449,11 +594,11 @@ EOS
         ;;
 
     snapshot-aufraeumen-taeglich)
-        PREFIX=$(whiptail --title "Namensanfang der automatischen Snapshots" --ok-button "$BTN_OK" \
-            --inputbox "Nur Snapshots, deren Name so beginnt, werden geloescht.\n\nSo bleiben von Hand angelegte Snapshots garantiert erhalten." 14 74 "auto-" 3>&1 1>&2 2>&3)
+        PREFIX=$(eingabe_dialog "Namensanfang der Snapshots" \
+            "Nur Snapshots, deren Name so beginnt, werden geloescht.\n\nSo bleiben von Hand angelegte Snapshots garantiert erhalten." "auto-")
         [ -z "${PREFIX:-}" ] && PREFIX="auto-"
-        DAYS=$(whiptail --title "Aufbewahrungsdauer" --ok-button "$BTN_OK" \
-            --inputbox "Snapshots aelter als wie viele Tage loeschen?\n\nEmpfehlung: 7 Tage." 12 70 "7" 3>&1 1>&2 2>&3)
+        DAYS=$(eingabe_dialog "Aufbewahrungsdauer" \
+            "Snapshots aelter als wie viele Tage loeschen?\n\nEmpfehlung: 7 Tage." "7")
         [ -z "${DAYS:-}" ] && DAYS=7
         write_helper "snapshot-alte-aufraeumen.sh" <<EOS
 #!/bin/bash
@@ -483,8 +628,8 @@ EOS
         ;;
 
     snapshot-zfs-aufraeumen-taeglich)
-        DAYS=$(whiptail --title "Aufbewahrungsdauer" --ok-button "$BTN_OK" \
-            --inputbox "ZFS-Snapshots aelter als wie viele Tage loeschen?\n\nAchtung: Snapshots der Proxmox-Replikation werden NICHT angefasst." 14 74 "14" 3>&1 1>&2 2>&3)
+        DAYS=$(eingabe_dialog "Aufbewahrungsdauer" \
+            "ZFS-Snapshots aelter als wie viele Tage loeschen?\n\nAchtung: Snapshots der Proxmox-Replikation\nwerden NICHT angefasst." "14")
         [ -z "${DAYS:-}" ] && DAYS=14
         write_helper "zfs-snapshots-aufraeumen.sh" <<EOS
 #!/bin/bash
@@ -1235,26 +1380,39 @@ show_job_info() {
 
 job_info_browser() {
     # Liste aller Jobs einer Kategorie; Auswahl oeffnet Info-Fenster,
-    # nach dem Schliessen bleibt man in derselben Liste an derselben Stelle
+    # nach dem Schliessen bleibt man in derselben Liste an derselben Stelle.
+    # Als Kennzeichen dient eine laufende Nummer, damit die Zeilen kurz
+    # bleiben und der Skriptname vollstaendig lesbar ist.
     local CAT="$1" TITEL="$2" LAST=""
     while true; do
-        local ITEMS=() DEF ID
+        local ITEMS=() IDS=() DEF ID NR=0 SP NSP BSP ZEILE
+        # Zeile: Nummer + Leerzeichen + "[x] " + Name + Beschreibung
+        SP=$(job_spalten $(( $(dlg_w 104) - 15 )))
+        NSP=${SP% *}; BSP=${SP#* }
+
         for DEF in "${CRON_JOB_DEFS[@]}"; do
             [ "$(job_field "$DEF" 2)" != "$CAT" ] && continue
             ID=$(job_field "$DEF" 1)
+            NR=$((NR+1))
+            IDS[NR]="$ID"
             local MARKER="[ ]"
             is_job_enabled "$ID" && MARKER="[x]"
-            ITEMS+=("$ID" "$MARKER $(job_field "$DEF" 3)  -  $(job_field "$DEF" 4)")
+            if [ "$BSP" -gt 0 ]; then
+                ZEILE="$MARKER $(fuellen "$(job_field "$DEF" 3)" "$NSP") $(kuerzen "$(job_field "$DEF" 4)" "$BSP")"
+            else
+                ZEILE="$MARKER $(kuerzen "$(job_field "$DEF" 3)" "$NSP")"
+            fi
+            ITEMS+=("$NR" "$ZEILE")
         done
         [ ${#ITEMS[@]} -eq 0 ] && { pause "In dieser Kategorie sind keine Jobs definiert."; return; }
 
         local SEL
         SEL=$(menu_dialog "Beschreibungen: $TITEL" \
-            "Skript auswaehlen und Enter druecken - dann oeffnet sich ein Info-Fenster mit der ausfuehrlichen Erklaerung.\n\n[x] = derzeit aktiv    [ ] = nicht aktiv" \
-            26 108 14 "$LAST" "${ITEMS[@]}")
+            "Skript auswaehlen und Enter druecken - es oeffnet sich ein\nFenster mit der ausfuehrlichen Erklaerung.\n\n[x] = derzeit aktiv     [ ] = nicht aktiv" \
+            26 104 14 "$LAST" "${ITEMS[@]}")
         [ -z "${SEL:-}" ] && return
         LAST="$SEL"
-        show_job_info "$SEL"
+        show_job_info "${IDS[$SEL]}"
     done
 }
 
@@ -1262,40 +1420,50 @@ job_checklist() {
     local CAT="$1" TITEL="$2"
     touch "$CRON_FILE"
 
-    local ITEMS=() IDS=() DEF ID
+    local ITEMS=() IDS=() DEF ID NR=0 SP NSP BSP ZEILE
+    # Zeile: "[ ] " + Nummer + Leerzeichen + Name + Beschreibung
+    SP=$(job_spalten $(( $(dlg_w 108) - 15 )))
+    NSP=${SP% *}; BSP=${SP#* }
+
     for DEF in "${CRON_JOB_DEFS[@]}"; do
         [ "$(job_field "$DEF" 2)" != "$CAT" ] && continue
         ID=$(job_field "$DEF" 1)
-        IDS+=("$ID")
+        NR=$((NR+1))
+        IDS[NR]="$ID"
         local STATE="OFF"
         is_job_enabled "$ID" && STATE="ON"
-        ITEMS+=("$ID" "$(job_field "$DEF" 3)  -  $(job_field "$DEF" 4)  [$(job_field "$DEF" 5)]" "$STATE")
+        if [ "$BSP" -gt 0 ]; then
+            ZEILE="$(fuellen "$(job_field "$DEF" 3)" "$NSP") $(kuerzen "$(job_field "$DEF" 4)" "$BSP")"
+        else
+            ZEILE="$(kuerzen "$(job_field "$DEF" 3)" "$NSP")"
+        fi
+        ITEMS+=("$NR" "$ZEILE" "$STATE")
     done
 
-    [ ${#ITEMS[@]} -eq 0 ] && { pause "In dieser Kategorie sind keine Jobs definiert."; return; }
+    [ "$NR" -eq 0 ] && { pause "In dieser Kategorie sind keine Jobs definiert."; return; }
 
     local SELECTED
-    SELECTED=$(whiptail --title "Jobs an-/abwaehlen: $TITEL" \
-        --ok-button "Uebernehmen" --cancel-button "$BTN_BACK" \
-        --checklist "Leertaste = an/abwaehlen, Enter = uebernehmen.\n\nEs werden nur die Jobs DIESER Kategorie geaendert." \
-        28 116 16 "${ITEMS[@]}" 3>&1 1>&2 2>&3)
+    SELECTED=$(checklist_dialog "Jobs an- und abwaehlen: $TITEL" \
+        "Leertaste = an/abwaehlen     Enter = uebernehmen\n\nEs werden nur die Jobs dieser Kategorie geaendert." \
+        28 108 16 "${ITEMS[@]}")
     [ $? -ne 0 ] && return
 
     # Alte Zeilen dieser Kategorie entfernen
-    for ID in "${IDS[@]}"; do
-        remove_job_line "$ID"
+    local I
+    for I in $(seq 1 "$NR"); do
+        remove_job_line "${IDS[$I]}"
     done
 
     eval "local -a AUSGEWAEHLT=($SELECTED)"
 
     local AKTIV=0 FEHLER=0
-    for ID in "${IDS[@]}"; do
+    for I in $(seq 1 "$NR"); do
         local GEWAEHLT=0 X
         for X in "${AUSGEWAEHLT[@]:-}"; do
-            [ "$X" == "$ID" ] && GEWAEHLT=1
+            [ "$X" == "$I" ] && GEWAEHLT=1
         done
         if [ "$GEWAEHLT" -eq 1 ]; then
-            if install_cron_job "$ID"; then
+            if install_cron_job "${IDS[$I]}"; then
                 AKTIV=$((AKTIV+1))
             else
                 FEHLER=$((FEHLER+1))
@@ -1303,25 +1471,29 @@ job_checklist() {
         fi
     done
 
-    pause "Fertig.\n\n$AKTIV Job(s) in der Kategorie \"$TITEL\" sind jetzt aktiv.$([ $FEHLER -gt 0 ] && echo "\n$FEHLER Job(s) konnten nicht eingerichtet werden (abgebrochen).")\n\nDie Jobs laufen ab sofort automatisch im Hintergrund.\nProtokolle findest du unter: $LOG_DIR" "Gespeichert"
+    local ZUSATZ=""
+    [ "$FEHLER" -gt 0 ] && ZUSATZ="\n$FEHLER Job(s) wurden abgebrochen und nicht eingerichtet."
+
+    pause "In der Kategorie\n  $TITEL\nsind jetzt $AKTIV Job(s) aktiv.$ZUSATZ\n\nSie laufen ab sofort automatisch im Hintergrund.\nProtokolle:  $LOG_DIR" "Gespeichert"
 }
 
 category_menu() {
-    local CAT="$1" TITEL="$2" LAST="1"
+    local CAT="$1" TITEL="$2" BESCHR="${3:-}" LAST="1"
     while true; do
-        local ANZ_AKTIV=0 DEF
+        local ANZ_AKTIV=0 GESAMT=0 DEF
         for DEF in "${CRON_JOB_DEFS[@]}"; do
             [ "$(job_field "$DEF" 2)" != "$CAT" ] && continue
+            GESAMT=$((GESAMT+1))
             is_job_enabled "$(job_field "$DEF" 1)" && ANZ_AKTIV=$((ANZ_AKTIV+1))
         done
 
         local CHOICE
         CHOICE=$(menu_dialog "$TITEL" \
-            "Derzeit aktiv in dieser Kategorie: $ANZ_AKTIV Job(s)\n\nWas moechtest du tun?" \
-            18 96 4 "$LAST" \
-            "1" "Skripte an- und abwaehlen (Checkliste)" \
+            "$BESCHR\n\nVon $GESAMT Skripten sind $ANZ_AKTIV aktiv." \
+            18 90 3 "$LAST" \
+            "1" "Skripte an- und abwaehlen" \
             "2" "Beschreibungen ansehen - was macht welches Skript?" \
-            "3" "Aktive Skripte dieser Kategorie anzeigen")
+            "3" "Nur die aktiven Skripte anzeigen")
         [ -z "${CHOICE:-}" ] && return
         LAST="$CHOICE"
         case "$CHOICE" in
@@ -1357,33 +1529,47 @@ category_menu() {
 cron_categories_menu() {
     local LAST=""
     while true; do
-        local ITEMS=() C KUERZEL NAME ANZ DEF
+        local ITEMS=() KUERZEL=() NAMEN=() TEXTE=()
+        local C KURZ BESCHR K ANZ GESAMT DEF NR=0
+
+        # Spalten so aufteilen, dass der Zaehler rechts immer sichtbar bleibt
+        local PLATZ NAMESP=18 ZAHLSP=7 BESCHRSP
+        PLATZ=$(( $(dlg_w 100) - 11 ))
+        BESCHRSP=$(( PLATZ - NAMESP - ZAHLSP - 2 ))
+        if [ "$BESCHRSP" -lt 16 ]; then
+            BESCHRSP=0
+            NAMESP=$(( PLATZ - ZAHLSP - 1 ))
+            [ "$NAMESP" -lt 10 ] && NAMESP=10
+        fi
+
         for C in "${CATEGORIES[@]}"; do
-            KUERZEL="${C%%|*}"
-            NAME="${C#*|}"
-            ANZ=0
+            K=$(cat_field "$C" 1)
+            KURZ=$(cat_field "$C" 2)
+            BESCHR=$(cat_field "$C" 3)
+            ANZ=0; GESAMT=0
             for DEF in "${CRON_JOB_DEFS[@]}"; do
-                [ "$(job_field "$DEF" 2)" != "$KUERZEL" ] && continue
+                [ "$(job_field "$DEF" 2)" != "$K" ] && continue
+                GESAMT=$((GESAMT+1))
                 is_job_enabled "$(job_field "$DEF" 1)" && ANZ=$((ANZ+1))
             done
-            local GESAMT
-            GESAMT=$(printf '%s\n' "${CRON_JOB_DEFS[@]}" | awk -F'|' -v k="$KUERZEL" '$2==k' | wc -l)
-            ITEMS+=("$KUERZEL" "$NAME   ($ANZ von $GESAMT aktiv)")
+            NR=$((NR+1))
+            KUERZEL[NR]="$K"
+            NAMEN[NR]="$KURZ"
+            TEXTE[NR]="$BESCHR"
+            if [ "$BESCHRSP" -gt 0 ]; then
+                ITEMS+=("$NR" "$(fuellen "$KURZ" "$NAMESP") $(fuellen "$BESCHR" "$BESCHRSP") $(printf '%*s' "$ZAHLSP" "$ANZ/$GESAMT")")
+            else
+                ITEMS+=("$NR" "$(fuellen "$KURZ" "$NAMESP") $(printf '%*s' "$ZAHLSP" "$ANZ/$GESAMT")")
+            fi
         done
 
         local CHOICE
         CHOICE=$(menu_dialog "Cron-Jobs - Kategorien" \
-            "Waehle einen Bereich aus. Danach siehst du die einzelnen Skripte.\n\nIn Klammern steht, wie viele Skripte darin gerade aktiv sind." \
-            24 104 10 "$LAST" "${ITEMS[@]}")
+            "Waehle einen Bereich aus - danach siehst du die einzelnen Skripte.\n\nDie Zahl rechts zeigt, wie viele Skripte darin gerade aktiv sind." \
+            22 100 8 "$LAST" "${ITEMS[@]}")
         [ -z "${CHOICE:-}" ] && return
         LAST="$CHOICE"
-
-        for C in "${CATEGORIES[@]}"; do
-            if [ "${C%%|*}" == "$CHOICE" ]; then
-                category_menu "$CHOICE" "${C#*|}"
-                break
-            fi
-        done
+        category_menu "${KUERZEL[$CHOICE]}" "${NAMEN[$CHOICE]}" "${TEXTE[$CHOICE]}"
     done
 }
 
@@ -1402,7 +1588,7 @@ show_all_active_jobs() {
         else
             local C KUERZEL NAME DEF GEF
             for C in "${CATEGORIES[@]}"; do
-                KUERZEL="${C%%|*}"; NAME="${C#*|}"
+                KUERZEL=$(cat_field "$C" 1); NAME=$(cat_field "$C" 2)
                 GEF=0
                 for DEF in "${CRON_JOB_DEFS[@]}"; do
                     [ "$(job_field "$DEF" 2)" != "$KUERZEL" ] && continue
@@ -1439,22 +1625,32 @@ deactivate_all_jobs() {
 
 test_run_job() {
     # Ein aktives Skript sofort testweise ausfuehren
-    local ITEMS=() DEF ID
+    local ITEMS=() IDS=() DEF ID NR=0 SP NSP BSP ZEILE
+    SP=$(job_spalten $(( $(dlg_w 104) - 11 )))
+    NSP=${SP% *}; BSP=${SP#* }
     for DEF in "${CRON_JOB_DEFS[@]}"; do
         ID=$(job_field "$DEF" 1)
         is_job_enabled "$ID" || continue
-        ITEMS+=("$ID" "$(job_field "$DEF" 3)  -  $(job_field "$DEF" 4)")
+        NR=$((NR+1))
+        IDS[NR]="$ID"
+        if [ "$BSP" -gt 0 ]; then
+            ZEILE="$(fuellen "$(job_field "$DEF" 3)" "$NSP") $(kuerzen "$(job_field "$DEF" 4)" "$BSP")"
+        else
+            ZEILE="$(kuerzen "$(job_field "$DEF" 3)" "$NSP")"
+        fi
+        ITEMS+=("$NR" "$ZEILE")
     done
-    if [ ${#ITEMS[@]} -eq 0 ]; then
+    if [ "$NR" -eq 0 ]; then
         pause "Es ist derzeit kein Job aktiv, der getestet werden koennte.\n\nAktiviere zuerst einen Job unter 'Cron-Jobs verwalten'."
         return
     fi
 
-    local SEL
-    SEL=$(menu_dialog "Skript jetzt testen" \
-        "Welches Skript soll sofort einmal ausgefuehrt werden?\n\nSo siehst du direkt, ob es funktioniert - ohne auf den Zeitplan zu warten." \
+    local NUM SEL
+    NUM=$(menu_dialog "Skript jetzt testen" \
+        "Welches Skript soll sofort einmal ausgefuehrt werden?\n\nSo siehst du direkt, ob es funktioniert - ohne auf den\nZeitplan zu warten." \
         24 104 12 "" "${ITEMS[@]}")
-    [ -z "${SEL:-}" ] && return
+    [ -z "${NUM:-}" ] && return
+    SEL="${IDS[$NUM]}"
 
     DEF=$(job_def_by_id "$SEL") || return
     local SKRIPT
@@ -1806,8 +2002,8 @@ echo '--- Nachher ---'; df -h / | tail -1" "Speicherplatz freigemacht"
 
 fix_alte_backups_loeschen() {
     local TAGE
-    TAGE=$(whiptail --title "Alte Sicherungen loeschen" --ok-button "$BTN_OK" \
-        --inputbox "Sicherungen, die aelter sind als diese Anzahl Tage,\nwerden geloescht.\n\nVorsicht: Das laesst sich nicht rueckgaengig machen.\nEmpfehlung: nicht unter 14 Tage gehen." 15 74 "30" 3>&1 1>&2 2>&3)
+    TAGE=$(eingabe_dialog "Alte Sicherungen loeschen" \
+        "Sicherungen, die aelter sind als diese Anzahl Tage,\nwerden geloescht.\n\nVorsicht: Das laesst sich nicht rueckgaengig machen.\nEmpfehlung: nicht unter 14 Tage gehen." "30")
     [ -z "${TAGE:-}" ] && return
 
     local TMPFILE
@@ -1999,8 +2195,8 @@ done" "DNS - Diagnose"
 
         if confirm "Moechtest du jetzt einen anderen DNS-Server eintragen?\n\nEmpfehlung, falls dein Router nicht funktioniert:\n1.1.1.1 (Cloudflare) oder 9.9.9.9 (Quad9)"; then
             local NEU
-            NEU=$(whiptail --title "DNS-Server" --ok-button "$BTN_OK" \
-                --inputbox "IP-Adresse des DNS-Servers eingeben:" 10 60 "1.1.1.1" 3>&1 1>&2 2>&3)
+            NEU=$(eingabe_dialog "DNS-Server" \
+                "IP-Adresse des DNS-Servers eingeben:" "1.1.1.1")
             if [ -n "${NEU:-}" ]; then
                 backup_file /etc/resolv.conf > /dev/null
                 run_and_show "sed -i '1i nameserver $NEU' /etc/resolv.conf; echo 'Neuer Inhalt von /etc/resolv.conf:'; cat /etc/resolv.conf; echo ''; getent hosts download.proxmox.com >/dev/null 2>&1 && echo 'Test: Namensaufloesung funktioniert jetzt' || echo 'Test: funktioniert weiterhin nicht'" "DNS-Server eingetragen"
@@ -2209,8 +2405,8 @@ fix_zfs_arc_begrenzen() {
     fi
 
     local NEU
-    NEU=$(whiptail --title "Obergrenze fuer den ZFS-Cache" --ok-button "$BTN_OK" \
-        --inputbox "Obergrenze in Gigabyte eingeben:\n\n(Bei ${GESAMT:-?} GB Gesamtspeicher waere z.B. $(( ${GESAMT:-8} / 4 )) GB ein vernuenftiger Wert)" 14 74 "$(( ${GESAMT:-8} / 4 ))" 3>&1 1>&2 2>&3)
+    NEU=$(eingabe_dialog "Obergrenze fuer den ZFS-Cache" \
+        "Obergrenze in Gigabyte eingeben:\n\nBei ${GESAMT:-?} GB Gesamtspeicher waere etwa\n$(( ${GESAMT:-8} / 4 )) GB ein vernuenftiger Wert." "$(( ${GESAMT:-8} / 4 ))")
     [ -z "${NEU:-}" ] && return
 
     if ! [[ "$NEU" =~ ^[0-9]+$ ]] || [ "$NEU" -lt 1 ]; then
@@ -2652,23 +2848,25 @@ datei_bearbeiten() {
 menu_dateien() {
     local LAST=""
     while true; do
-        local ITEMS=() E
+        local ITEMS=() PFADE=() E NR=0
         for E in "${WICHTIGE_DATEIEN[@]}"; do
-            ITEMS+=("${E%%|*}" "${E#*|}")
+            NR=$((NR+1))
+            PFADE[NR]="${E%%|*}"
+            ITEMS+=("$NR" "$(fuellen "${E%%|*}" 26) ${E#*|}")
         done
-        ITEMS+=("SICHERUNG" "Eine fruehere Sicherungskopie zurueckspielen")
-        ITEMS+=("LISTE" "Vorhandene Sicherungskopien ansehen")
+        ITEMS+=("Z" "Eine fruehere Sicherungskopie zurueckspielen")
+        ITEMS+=("L" "Vorhandene Sicherungskopien ansehen")
 
         local C
         C=$(menu_dialog "Konfigurationsdateien (fortgeschritten)" \
             "ACHTUNG: Hier bearbeitest du echte Systemdateien.\nVor jeder Aenderung wird automatisch eine Kopie angelegt.\n\nWenn du unsicher bist, nutze lieber die anderen Menuepunkte." \
-            24 100 12 "$LAST" "${ITEMS[@]}")
+            24 96 11 "$LAST" "${ITEMS[@]}")
         [ -z "${C:-}" ] && return
         LAST="$C"
         case "$C" in
-            SICHERUNG) sicherung_zurueckspielen ;;
-            LISTE) run_and_show "ls -lht '$BACKUP_DIR' 2>/dev/null | head -40 || echo 'Noch keine Sicherungskopien vorhanden.'" "Vorhandene Sicherungskopien" ;;
-            *) datei_bearbeiten "$C" ;;
+            Z) sicherung_zurueckspielen ;;
+            L) run_and_show "ls -lht '$BACKUP_DIR' 2>/dev/null | head -40 || echo 'Noch keine Sicherungskopien vorhanden.'" "Vorhandene Sicherungskopien" ;;
+            *) datei_bearbeiten "${PFADE[$C]}" ;;
         esac
     done
 }
@@ -2678,22 +2876,25 @@ sicherung_zurueckspielen() {
         pause "Es sind noch keine Sicherungskopien vorhanden."
         return
     fi
-    local ITEMS=() B
+    local ITEMS=() NAMEN=() B NR=0
     while IFS= read -r B; do
         [ -f "$BACKUP_DIR/$B" ] || continue
-        ITEMS+=("$B" "$(date -r "$BACKUP_DIR/$B" '+%d.%m.%Y %H:%M' 2>/dev/null)")
+        NR=$((NR+1))
+        NAMEN[NR]="$B"
+        ITEMS+=("$NR" "$(fuellen "$B" 44) $(date -r "$BACKUP_DIR/$B" '+%d.%m.%Y %H:%M' 2>/dev/null)")
     done < <(ls -1t "$BACKUP_DIR" 2>/dev/null | head -40)
-    [ ${#ITEMS[@]} -eq 0 ] && { pause "Es sind keine Sicherungskopien vorhanden."; return; }
+    [ "$NR" -eq 0 ] && { pause "Es sind keine Sicherungskopien vorhanden."; return; }
 
-    local SEL
-    SEL=$(menu_dialog "Sicherungskopie zurueckspielen" "Welche Kopie moechtest du zurueckspielen?" 24 100 14 "" "${ITEMS[@]}")
-    [ -z "${SEL:-}" ] && return
+    local NUM SEL
+    NUM=$(menu_dialog "Sicherungskopie zurueckspielen" "Welche Kopie moechtest du zurueckspielen?" 24 92 14 "" "${ITEMS[@]}")
+    [ -z "${NUM:-}" ] && return
+    SEL="${NAMEN[$NUM]}"
 
     local ORIG
     ORIG=$(echo "$SEL" | sed -E 's/\.[0-9]{8}_[0-9]{6}\.bak$//')
     local ZIEL
-    ZIEL=$(whiptail --title "Zielpfad" --ok-button "$BTN_OK" \
-        --inputbox "Wohin soll die Kopie zurueckgespielt werden?\n\n(Bitte pruefen - der Vorschlag ist nur geraten)" 13 78 "/etc/$ORIG" 3>&1 1>&2 2>&3)
+    ZIEL=$(eingabe_dialog "Zielpfad" \
+        "Wohin soll die Kopie zurueckgespielt werden?\n\nBitte pruefen - der Vorschlag ist nur geraten." "/etc/$ORIG")
     [ -z "${ZIEL:-}" ] && return
 
     if confirm_risky "Sicherungskopie\n  $SEL\nzurueckspielen nach\n  $ZIEL\n\nDie aktuelle Datei wird vorher ebenfalls gesichert.\n\nFortfahren?" "Zurueckspielen"; then
@@ -2707,7 +2908,7 @@ sicherung_zurueckspielen() {
 
 gesamtdiagnose() {
     local BERICHT="$LOG_DIR/diagnose_$(date '+%Y%m%d_%H%M%S').txt"
-    whiptail --title "Bitte warten" --infobox "Der Systembericht wird erstellt.\n\nDas dauert etwa 10 bis 30 Sekunden." 10 60
+    whiptail --title " Bitte warten " --infobox "Der Systembericht wird erstellt.\n\nDas dauert etwa 10 bis 30 Sekunden." 10 "$(dlg_w 60)"
     {
         echo "=========================================================="
         echo " Proxmox-Systembericht"
@@ -2834,18 +3035,20 @@ logs_menu() {
         LAST="$C"
         case "$C" in
             1)
-                local DATEIEN=() F
+                local DATEIEN=() PFADE=() F NR=0
                 while IFS= read -r F; do
                     [ -f "$F" ] || continue
-                    DATEIEN+=("$F" "$(du -h "$F" 2>/dev/null | cut -f1), zuletzt $(date -r "$F" '+%d.%m. %H:%M' 2>/dev/null)")
+                    NR=$((NR+1))
+                    PFADE[NR]="$F"
+                    DATEIEN+=("$NR" "$(fuellen "$(basename "$F")" 30) $(du -h "$F" 2>/dev/null | cut -f1)  zuletzt $(date -r "$F" '+%d.%m. %H:%M' 2>/dev/null)")
                 done < <(find "$LOG_DIR" -maxdepth 1 -name '*.log' 2>/dev/null | sort)
-                if [ ${#DATEIEN[@]} -eq 0 ]; then
+                if [ "$NR" -eq 0 ]; then
                     pause "Es sind noch keine Protokolle vorhanden.\n\nSobald ein Cron-Job gelaufen ist, erscheinen sie hier."
                     continue
                 fi
                 local SEL
-                SEL=$(menu_dialog "Protokoll auswaehlen" "Welches Protokoll moechtest du ansehen?" 24 96 14 "" "${DATEIEN[@]}")
-                [ -n "${SEL:-}" ] && run_and_show "tail -n 200 '$SEL'" "$(basename "$SEL")"
+                SEL=$(menu_dialog "Protokoll auswaehlen" "Welches Protokoll moechtest du ansehen?" 24 90 14 "" "${DATEIEN[@]}")
+                [ -n "${SEL:-}" ] && run_and_show "tail -n 200 '${PFADE[$SEL]}'" "$(basename "${PFADE[$SEL]}")"
                 ;;
             2) run_and_show "tail -n 100 '$LOG_DIR/aktionen.log' 2>/dev/null || echo 'Noch keine Aktionen protokolliert.'" "Verlauf der Aktionen" ;;
             3) run_and_show "journalctl -p err --since '24 hours ago' --no-pager 2>/dev/null | tail -80 || echo 'Keine Fehler gefunden.'" "System-Fehlermeldungen" ;;
